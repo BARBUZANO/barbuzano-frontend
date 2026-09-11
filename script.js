@@ -362,3 +362,97 @@ if (prefersReducedMotion) {
 } else {
   requestAnimationFrame(frame);
 }
+
+// ============================================
+// LÓGICA DE AUTENTICACIÓN (CLOUDFLARE WORKER)
+// ============================================
+
+const WORKER_URL =
+    'https://barbuzano-auth-worker.barbuzano.workers.dev';
+
+document.addEventListener('DOMContentLoaded', () => {
+    const loginBtn = document.getElementById('login-btn');
+    const usernameInput = document.getElementById('username');
+    const passwordInput = document.getElementById('password');
+
+    // Comprobar que existen los elementos del formulario
+    if (!loginBtn || !usernameInput || !passwordInput) {
+        console.warn(
+            'No se encontraron los elementos del formulario de login en el DOM.'
+        );
+        return;
+    }
+
+    loginBtn.addEventListener('click', async (e) => {
+        e.preventDefault();
+
+        // Evitar enviar el formulario y recargar la página
+        const username = usernameInput.value.trim();
+        const password = passwordInput.value;
+
+        // Comprobar que se han rellenado los campos
+        if (!username || !password) {
+            alert('Por favor, rellena todos los campos.');
+            return;
+        }
+
+        // Feedback visual en el botón
+        const originalText = loginBtn.textContent;
+
+        loginBtn.textContent = 'Accediendo...';
+        loginBtn.disabled = true;
+
+        try {
+            // Realizar petición al Cloudflare Worker
+            const response = await fetch(
+                `${WORKER_URL}/api/login`,
+                {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        username,
+                        password,
+                    }),
+                }
+            );
+
+            const data = await response.json();
+
+            // Comprobar respuesta del servidor
+            if (!response.ok) {
+                alert(
+                    `Error: ${
+                        data.error || 'Credenciales incorrectas'
+                    }`
+                );
+            } else {
+                alert(
+                    `¡Bienvenido de nuevo, ${data.user.username}!`
+                );
+
+                // Aquí puedes redirigir al panel
+                // o guardar el estado de sesión.
+
+                // Ejemplo:
+                // window.location.href = '/dashboard.html';
+            }
+
+        } catch (error) {
+            console.error(
+                'Error en la petición de login:',
+                error
+            );
+
+            alert(
+                'No se pudo conectar con el servidor de autenticación.'
+            );
+
+        } finally {
+            // Restaurar el botón a su estado original
+            loginBtn.textContent = originalText;
+            loginBtn.disabled = false;
+        }
+    });
+});
