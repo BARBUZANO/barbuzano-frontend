@@ -1,0 +1,17 @@
+{
+  "name": "barbuzano-frontend",
+  "main": "src/index.js",
+  "compatibility_date": "2026-09-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "2b5e35774f254017b7eed955a8912001"
+    }
+  ]
+}
