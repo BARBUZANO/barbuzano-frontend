@@ -1,0 +1,16 @@
+{
+  "name": "barbuzano-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "mysql2": "^3.13.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
