@@ -27,10 +27,10 @@
       </svg>
     </a>
     <nav class="nav">
-      <a href="#servicios">Servicias</a>
+      <a href="#servicios">Servicios</a>
       <a href="#quienes-somos">Quiénes somos</a>
       <a href="#contacto">Contacto</a>
-      <a href="#acceder" class="cta">Acceder</a>
+      <button type="button" class="cta" id="acceder-btn">Acceder</button>
     </nav>
   </header>
 
@@ -39,17 +39,33 @@
     <p class="slogan">El equilibrio<br>de tus cuentas,<br>con criterio.</p>
   </main>
 
-  <!-- SECCIÓN DE ACCESO / LOGIN -->
-  <section id="acceder" class="login-section">
-    <div class="login-card">
-      <h2>Área de Acceso</h2>
-      <form id="login-form">
-        <input type="text" id="username" placeholder="Usuario" required>
-        <input type="password" id="password" placeholder="Contraseña" required>
-        <button type="submit" id="login-btn">Acceder</button>
+  <div class="login-overlay" id="login-overlay" aria-hidden="true">
+    <div class="login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
+      <button type="button" class="login-close" id="login-close" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+
+      <h2 id="login-title">Acceso de clientes</h2>
+      <p class="login-subtitle">Introduce tus credenciales para acceder a tus consultas y documentos.</p>
+
+      <form class="login-form" id="login-form" novalidate>
+        <label class="login-field">
+          <span>Usuario</span>
+          <input type="text" id="username" placeholder="Usuario" autocomplete="username" required>
+        </label>
+        <label class="login-field">
+          <span>Contraseña</span>
+          <input type="password" id="password" placeholder="Contraseña" autocomplete="current-password" required>
+        </label>
+
+        <p class="login-error" id="login-error" role="alert" hidden>Usuario o contraseña incorrectos.</p>
+
+        <button type="submit" id="login-btn" class="login-submit">Acceder</button>
       </form>
+
+      <a href="#recuperar" class="login-forgot">¿Has olvidado tu contraseña?</a>
     </div>
-  </section>
+  </div>
 
   <footer class="footer">
     <span>Barbuzano Firma de Asesores</span>
