@@ -363,8 +363,7 @@ if (prefersReducedMotion) {
   requestAnimationFrame(frame);
 }
 
-// ---- Modal de login conectado al Cloudflare Worker ----
-
+// ---- Modal de login (maqueta visual, sin backend todavía) ----
 const accederBtn = document.getElementById('acceder-btn');
 const loginOverlay = document.getElementById('login-overlay');
 const loginClose = document.getElementById('login-close');
@@ -373,94 +372,60 @@ const loginError = document.getElementById('login-error');
 const usernameInput = document.getElementById('username');
 const passwordInput = document.getElementById('password');
 
-const WORKER_URL = 'https://barbuzano-auth-worker.barbuzano.workers.dev';
-
 function openLogin() {
-    loginOverlay.classList.add('is-open');
-    loginOverlay.setAttribute('aria-hidden', 'false');
-    loginError.hidden = true;
-
-    setTimeout(() => usernameInput.focus(), 50);
-
-    document.addEventListener('keydown', onKeydown);
+  loginOverlay.classList.add('is-open');
+  loginOverlay.setAttribute('aria-hidden', 'false');
+  loginError.hidden = true;
+  setTimeout(() => usernameInput.focus(), 50);
+  document.addEventListener('keydown', onKeydown);
 }
 
 function closeLogin() {
-    loginOverlay.classList.remove('is-open');
-    loginOverlay.setAttribute('aria-hidden', 'true');
-    loginForm.reset();
-
-    document.removeEventListener('keydown', onKeydown);
+  loginOverlay.classList.remove('is-open');
+  loginOverlay.setAttribute('aria-hidden', 'true');
+  loginForm.reset();
+  document.removeEventListener('keydown', onKeydown);
 }
 
 function onKeydown(e) {
-    if (e.key === 'Escape') closeLogin();
+  if (e.key === 'Escape') closeLogin();
 }
 
 accederBtn.addEventListener('click', openLogin);
-
 loginClose.addEventListener('click', closeLogin);
 
 loginOverlay.addEventListener('click', (e) => {
-    if (e.target === loginOverlay) closeLogin();
+  if (e.target === loginOverlay) closeLogin();
 });
 
-// Petición real al servidor de autenticación
-
 loginForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
+  e.preventDefault();
+  loginError.hidden = true;
 
-    loginError.hidden = true;
+  const username = usernameInput.value.trim();
+  const password = passwordInput.value;
 
-    const username = usernameInput.value.trim();
-    const password = passwordInput.value;
+  const submitBtn = document.getElementById('login-btn');
+  submitBtn.disabled = true;
 
-    if (!username || !password) {
-        loginError.textContent = 'Por favor, completa todos los campos.';
-        loginError.hidden = false;
-        return;
+  try {
+    const response = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+
+    if (!response.ok) {
+      loginError.hidden = false;
+      return;
     }
 
-    const submitBtn = loginForm.querySelector('button[type="submit"]');
-    const originalText = submitBtn.textContent;
-
-    submitBtn.textContent = 'Verificando...';
-    submitBtn.disabled = true;
-
-    try {
-        const response = await fetch(`${WORKER_URL}/api/login`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                username,
-                password
-            }),
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            loginError.textContent =
-                data.error || 'Usuario o contraseña incorrectos.';
-
-            loginError.hidden = false;
-        } else {
-            alert(`¡Bienvenido de nuevo, ${data.user.username}!`);
-            closeLogin();
-        }
-
-    } catch (err) {
-        console.error('Error en la autenticación:', err);
-
-        loginError.textContent =
-            'Error de conexión con el servidor.';
-
-        loginError.hidden = false;
-
-    } finally {
-        submitBtn.textContent = originalText;
-        submitBtn.disabled = false;
-    }
+    // Login correcto: la cookie de sesión ya la puso el servidor.
+    // Redirigimos al área de clientes, que exige esa cookie para dejarte entrar.
+    window.location.href = '/clientes';
+  } catch (err) {
+    loginError.hidden = false;
+  } finally {
+    submitBtn.disabled = false;
+  }
 });
