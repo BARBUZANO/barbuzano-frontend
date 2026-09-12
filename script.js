@@ -363,42 +363,104 @@ if (prefersReducedMotion) {
   requestAnimationFrame(frame);
 }
 
-// ---- Modal de login (maqueta visual, sin backend todavía) ----
+// ---- Modal de login conectado al Cloudflare Worker ----
+
 const accederBtn = document.getElementById('acceder-btn');
 const loginOverlay = document.getElementById('login-overlay');
 const loginClose = document.getElementById('login-close');
 const loginForm = document.getElementById('login-form');
 const loginError = document.getElementById('login-error');
 const usernameInput = document.getElementById('username');
+const passwordInput = document.getElementById('password');
+
+const WORKER_URL = 'https://barbuzano-auth-worker.barbuzano.workers.dev';
 
 function openLogin() {
-  loginOverlay.classList.add('is-open');
-  loginOverlay.setAttribute('aria-hidden', 'false');
-  loginError.hidden = true;
-  setTimeout(() => usernameInput.focus(), 50);
-  document.addEventListener('keydown', onKeydown);
+    loginOverlay.classList.add('is-open');
+    loginOverlay.setAttribute('aria-hidden', 'false');
+    loginError.hidden = true;
+
+    setTimeout(() => usernameInput.focus(), 50);
+
+    document.addEventListener('keydown', onKeydown);
 }
 
 function closeLogin() {
-  loginOverlay.classList.remove('is-open');
-  loginOverlay.setAttribute('aria-hidden', 'true');
-  loginForm.reset();
-  document.removeEventListener('keydown', onKeydown);
+    loginOverlay.classList.remove('is-open');
+    loginOverlay.setAttribute('aria-hidden', 'true');
+    loginForm.reset();
+
+    document.removeEventListener('keydown', onKeydown);
 }
 
 function onKeydown(e) {
-  if (e.key === 'Escape') closeLogin();
+    if (e.key === 'Escape') closeLogin();
 }
 
 accederBtn.addEventListener('click', openLogin);
+
 loginClose.addEventListener('click', closeLogin);
 
 loginOverlay.addEventListener('click', (e) => {
-  if (e.target === loginOverlay) closeLogin();
+    if (e.target === loginOverlay) closeLogin();
 });
 
-loginForm.addEventListener('submit', (e) => {
-  e.preventDefault();
-  // Maqueta: aquí falta conectar con la verificación real (MySQL / Cloudflare).
-  loginError.hidden = false;
+// Petición real al servidor de autenticación
+
+loginForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+
+    loginError.hidden = true;
+
+    const username = usernameInput.value.trim();
+    const password = passwordInput.value;
+
+    if (!username || !password) {
+        loginError.textContent = 'Por favor, completa todos los campos.';
+        loginError.hidden = false;
+        return;
+    }
+
+    const submitBtn = loginForm.querySelector('button[type="submit"]');
+    const originalText = submitBtn.textContent;
+
+    submitBtn.textContent = 'Verificando...';
+    submitBtn.disabled = true;
+
+    try {
+        const response = await fetch(`${WORKER_URL}/api/login`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                username,
+                password
+            }),
+        });
+
+        const data = await response.json();
+
+        if (!response.ok) {
+            loginError.textContent =
+                data.error || 'Usuario o contraseña incorrectos.';
+
+            loginError.hidden = false;
+        } else {
+            alert(`¡Bienvenido de nuevo, ${data.user.username}!`);
+            closeLogin();
+        }
+
+    } catch (err) {
+        console.error('Error en la autenticación:', err);
+
+        loginError.textContent =
+            'Error de conexión con el servidor.';
+
+        loginError.hidden = false;
+
+    } finally {
+        submitBtn.textContent = originalText;
+        submitBtn.disabled = false;
+    }
 });
