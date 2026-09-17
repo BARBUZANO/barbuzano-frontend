@@ -109,36 +109,44 @@
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
       </button>
 
-      <div class="file-modal-head">
-        <span class="file-icon" id="file-modal-icon">PDF</span>
-        <div>
-          <h2 id="file-modal-title">nombre-archivo.pdf</h2>
-          <span class="status-pill" id="file-modal-status">Nuevo</span>
+      <div class="file-modal-layout">
+
+        <div class="file-modal-preview-col">
+          <div class="file-preview" id="file-preview"></div>
         </div>
-      </div>
 
-      <div class="file-preview" id="file-preview"></div>
+        <div class="file-modal-info-col">
+          <div class="file-modal-head">
+            <span class="file-icon" id="file-modal-icon">PDF</span>
+            <div>
+              <h2 id="file-modal-title">nombre-archivo.pdf</h2>
+              <span class="status-pill" id="file-modal-status">Nuevo</span>
+            </div>
+          </div>
 
-      <dl class="file-meta">
-        <div><dt>Subido por</dt><dd id="meta-uploaded-by">—</dd></div>
-        <div><dt>Fecha de subida</dt><dd id="meta-uploaded-at">—</dd></div>
-        <div><dt>Fecha de apertura</dt><dd id="meta-opened-at">—</dd></div>
-      </dl>
+          <dl class="file-meta">
+            <div><dt>Subido por</dt><dd id="meta-uploaded-by">—</dd></div>
+            <div><dt>Fecha de subida</dt><dd id="meta-uploaded-at">—</dd></div>
+            <div><dt>Fecha de apertura</dt><dd id="meta-opened-at">—</dd></div>
+          </dl>
 
-      <div class="file-history">
-        <span class="sidebar-label">Historial</span>
-        <ul id="file-history-list"></ul>
-      </div>
+          <div class="file-history">
+            <span class="sidebar-label">Historial</span>
+            <ul id="file-history-list"></ul>
+          </div>
 
-      <div class="file-comment" id="file-comment-block">
-        <label class="login-field">
-          <span>Añadir comentario</span>
-          <textarea id="file-comment-input" rows="2" placeholder="Escribe un comentario para el cliente…"></textarea>
-        </label>
-        <div class="file-modal-actions">
-          <button type="button" class="pill-btn ghost-btn" id="reject-btn">Rechazar</button>
-          <button type="button" class="pill-btn" id="accept-btn">Aceptar</button>
+          <div class="file-comment" id="file-comment-block">
+            <label class="login-field">
+              <span>Añadir comentario</span>
+              <textarea id="file-comment-input" rows="2" placeholder="Escribe un comentario para el cliente…"></textarea>
+            </label>
+            <div class="file-modal-actions">
+              <button type="button" class="pill-btn ghost-btn" id="reject-btn">Rechazar</button>
+              <button type="button" class="pill-btn" id="accept-btn">Aceptar</button>
+            </div>
+          </div>
         </div>
+
       </div>
     </div>
   </div>
