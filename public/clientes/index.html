@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Área de clientes — Barbuzano</title>
+  <link rel="icon" type="image/svg+xml" href="../favicon.svg">
+  <link rel="stylesheet" href="../styles.css">
+  <link rel="stylesheet" href="clientes.css">
+</head>
+<body class="app">
+
+  <div class="app-shell">
+
+    <!-- ---------- Topbar ---------- -->
+    <header class="app-topbar">
+      <a href="#" class="logo" aria-label="Barbuzano — inicio">
+        <svg viewBox="0 0 1024 1024" role="img" aria-hidden="true">
+          <g transform="translate(0.000000,1024.000000) scale(0.100000,-0.100000)" fill="currentColor" stroke="none">
+            <path d="M0 5120 l0 -5120 5120 0 5120 0 0 5120 0 5120 -5120 0 -5120 0 0
+            -5120z m4902 3427 c373 -64 674 -190 951 -398 499 -374 807 -926 868 -1554 22
+            -231 -3 -536 -62 -758 -12 -43 -20 -79 -18 -81 2 -2 44 -27 92 -56 473 -278
+            844 -774 982 -1315 91 -356 93 -726 4 -1072 -216 -847 -946 -1496 -1817 -1617
+            -97 -14 -273 -16 -1252 -16 l-1140 0 0 1274 0 1274 -27 5 c-16 3 -250 6 -522
+            7 -272 0 -497 3 -500 6 -9 8 -13 3616 -5 3991 l6 323 452 3 c248 1 775 2 1171
+            2 620 -2 733 -4 817 -18z"/>
+            <path d="M4483 6003 l-963 -3 0 -881 0 -880 653 4 c614 3 659 5 772 25 286 51
+            510 134 743 274 343 206 622 513 802 883 58 119 130 298 130 324 0 14 -194 99
+            -332 145 -141 48 -278 79 -418 95 -132 15 -352 17 -1387 14z"/>
+          </g>
+        </svg>
+        <span class="logo-label">Barbuzano</span>
+      </a>
+
+      <div class="topbar-right">
+        <!-- Selector de rol temporal, solo para revisar el diseño sin backend real -->
+        <div class="demo-switch" id="demo-switch" title="Solo para revisar el diseño — se elimina al conectar el backend">
+          <button type="button" class="demo-opt is-active" data-role="cliente">Vista cliente</button>
+          <button type="button" class="demo-opt" data-role="admin">Vista admin</button>
+        </div>
+
+        <div class="user-chip">
+          <span class="user-avatar" id="user-avatar">S</span>
+          <span class="user-name" id="user-name">Sebas</span>
+        </div>
+
+        <button type="button" class="icon-btn" id="logout-btn" title="Cerrar sesión" aria-label="Cerrar sesión">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <div class="app-body">
+
+      <!-- ---------- Sidebar ---------- -->
+      <aside class="app-sidebar">
+
+        <div class="sidebar-section" id="client-switcher-section" hidden>
+          <span class="sidebar-label">Clientes</span>
+          <ul class="client-list" id="client-list"></ul>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="sidebar-label-row">
+            <span class="sidebar-label">Carpetas</span>
+            <button type="button" class="sidebar-add" id="new-folder-btn" aria-label="Nueva carpeta">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"/></svg>
+            </button>
+          </div>
+          <ul class="folder-list" id="folder-list"></ul>
+        </div>
+
+      </aside>
+
+      <!-- ---------- Main ---------- -->
+      <main class="app-main">
+
+        <div class="main-header">
+          <div>
+            <p class="eyebrow" id="context-eyebrow">Carpeta</p>
+            <h1 class="folder-title" id="folder-title">General</h1>
+          </div>
+
+          <div class="tabs" id="tabs">
+            <button type="button" class="tab is-active" data-tab="enviados">Enviados</button>
+            <button type="button" class="tab" data-tab="recibidos">Recibidos</button>
+          </div>
+        </div>
+
+        <section class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Subir archivo">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7 9m5-5l5 5M5 20h14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
+          <p><strong>Arrastra un archivo aquí</strong> o haz clic para seleccionarlo</p>
+          <span class="dropzone-hint">PDF, JPG o PNG · máx. 15&nbsp;MB</span>
+          <input type="file" id="file-input" accept=".pdf,.jpg,.jpeg,.png" hidden>
+        </section>
+
+        <ul class="file-list" id="file-list"></ul>
+
+        <p class="empty-state" id="empty-state" hidden>No hay archivos en esta carpeta todavía.</p>
+
+      </main>
+    </div>
+  </div>
+
+  <!-- ---------- Modal: detalle / historial de archivo ---------- -->
+  <div class="file-modal-overlay" id="file-modal-overlay" aria-hidden="true">
+    <div class="file-modal" role="dialog" aria-modal="true" aria-labelledby="file-modal-title">
+      <button type="button" class="login-close" id="file-modal-close" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+
+      <div class="file-modal-head">
+        <span class="file-icon" id="file-modal-icon">PDF</span>
+        <div>
+          <h2 id="file-modal-title">nombre-archivo.pdf</h2>
+          <span class="status-pill" id="file-modal-status">Nuevo</span>
+        </div>
+      </div>
+
+      <dl class="file-meta">
+        <div><dt>Subido por</dt><dd id="meta-uploaded-by">—</dd></div>
+        <div><dt>Fecha de subida</dt><dd id="meta-uploaded-at">—</dd></div>
+        <div><dt>Fecha de apertura</dt><dd id="meta-opened-at">—</dd></div>
+      </dl>
+
+      <div class="file-history">
+        <span class="sidebar-label">Historial</span>
+        <ul id="file-history-list"></ul>
+      </div>
+
+      <div class="file-comment" id="file-comment-block">
+        <label class="login-field">
+          <span>Añadir comentario</span>
+          <textarea id="file-comment-input" rows="2" placeholder="Escribe un comentario para el cliente…"></textarea>
+        </label>
+        <div class="file-modal-actions">
+          <button type="button" class="pill-btn ghost-btn" id="reject-btn">Rechazar</button>
+          <button type="button" class="pill-btn" id="accept-btn">Aceptar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="clientes.js"></script>
+</body>
+</html>
