@@ -111,8 +111,10 @@
   const historyListEl = $('#file-history-list');
   const commentBlock = $('#file-comment-block');
   const commentInput = $('#file-comment-input');
+  const previewEl = $('#file-preview');
 
   let activeFileId = null;
+  let currentPreviewObjectUrl = null; // para poder liberarlo (revokeObjectURL) al cerrar
 
   // ---------- Render: selector de clientes (solo admin) ----------
   function renderClients() {
@@ -290,6 +292,12 @@
       uploaded_at: now,
       opened_at: null,
       status: 'nuevo',
+      // Solo en esta demo: como el archivo se ha elegido de verdad en el navegador,
+      // podemos generar una URL local para previsualizarlo. Cuando el archivo venga
+      // de R2, aquí irá la URL real de descarga/preview servida por el Worker.
+      previewUrl: (ext === 'pdf' || ext === 'jpg' || ext === 'jpeg' || ext === 'png')
+        ? URL.createObjectURL(file)
+        : null,
       history: [{ label: `Subido por ${uploader === 'sebas' ? 'Sebas' : 'la asesoría'}`, date: now }],
     });
     renderFolders();
@@ -315,6 +323,8 @@
       file.history.push({ label: 'Abierto', date: file.opened_at });
     }
 
+    renderPreview(file);
+
     modalIcon.textContent = file.mime.toUpperCase();
     modalTitle.textContent = file.name;
     modalStatus.textContent = statusLabel(file.status);
@@ -336,10 +346,41 @@
     renderFiles();
   }
 
+  // TODO backend: cuando los archivos vengan de R2, esta función simplemente
+  // apuntará <img>/<iframe> a la URL de descarga firmada que devuelva el Worker,
+  // sin necesidad de distinguir "con preview real" vs "placeholder".
+  function renderPreview(file) {
+    if (currentPreviewObjectUrl) {
+      URL.revokeObjectURL(currentPreviewObjectUrl);
+      currentPreviewObjectUrl = null;
+    }
+
+    if (file.previewUrl) {
+      currentPreviewObjectUrl = file.previewUrl.startsWith('blob:') ? file.previewUrl : null;
+      if (file.mime === 'pdf') {
+        previewEl.innerHTML = `<iframe src="${file.previewUrl}" title="Vista previa de ${file.name}"></iframe>`;
+      } else {
+        previewEl.innerHTML = `<img src="${file.previewUrl}" alt="Vista previa de ${file.name}">`;
+      }
+      return;
+    }
+
+    previewEl.innerHTML = `
+      <div class="file-preview-placeholder">
+        Vista previa no disponible todavía en esta demo.<br>
+        Se mostrará aquí en cuanto el archivo venga del bucket real (R2).
+      </div>
+    `;
+  }
+
   function closeFileModal() {
     modalOverlay.classList.remove('is-open');
     modalOverlay.setAttribute('aria-hidden', 'true');
     activeFileId = null;
+    if (currentPreviewObjectUrl) {
+      URL.revokeObjectURL(currentPreviewObjectUrl);
+      currentPreviewObjectUrl = null;
+    }
   }
 
   $('#file-modal-close').addEventListener('click', closeFileModal);
