@@ -86,6 +86,13 @@ async function folderBelongsToClient(db, folderId, clientId) {
   return rows.length > 0;
 }
 
+// ¿Es esta sesión la destinataria del archivo?
+// - Archivos 'cliente_a_asesoria' los recibe el admin.
+// - Archivos 'asesoria_a_cliente' los recibe el cliente.
+function isRecipient(file, session) {
+  return (session.role === 'admin') === (file.direction === 'cliente_a_asesoria');
+}
+
 // ---------- Endpoints de archivos ----------
 
 async function handleUpload(request, env, session) {
@@ -163,7 +170,8 @@ async function handleDownload(fileId, env, session) {
     const object = await env.BARBUZANO_FILES.get(file.r2_key);
     if (!object) return json({ error: 'Archivo no encontrado en R2' }, 404);
 
-    if (file.status === 'nuevo') {
+    // Solo el destinatario "abre" el archivo; si lo descarga quien lo subió, no cuenta.
+    if (file.status === 'nuevo' && isRecipient(file, session)) {
       await db.query(`UPDATE files SET status = 'abierto' WHERE id = ?`, [fileId]);
       await db.query(
         `INSERT INTO file_events (file_id, user_id, event_type) VALUES (?, ?, 'apertura')`,
@@ -196,6 +204,10 @@ async function handleStatusUpdate(fileId, request, env, session) {
     if (session.role !== 'admin' && file.client_id !== session.userId) {
       return json({ error: 'No autorizado' }, 403);
     }
+    // Solo quien recibe el archivo puede aceptarlo o rechazarlo.
+    if (!isRecipient(file, session)) {
+      return json({ error: 'Solo el destinatario puede resolver este archivo' }, 403);
+    }
 
     await db.query(`UPDATE files SET status = ? WHERE id = ?`, [status, fileId]);
     await db.query(
@@ -204,6 +216,28 @@ async function handleStatusUpdate(fileId, request, env, session) {
     );
 
     return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+async function handleFileEvents(fileId, env, session) {
+  const db = await getDbConnection(env);
+  try {
+    const [files] = await db.query('SELECT client_id FROM files WHERE id = ?', [fileId]);
+    const file = files[0];
+    if (!file) return json({ error: 'No encontrado' }, 404);
+    if (session.role !== 'admin' && file.client_id !== session.userId) {
+      return json({ error: 'No autorizado' }, 403);
+    }
+
+    const [rows] = await db.query(
+      `SELECT e.event_type, e.comment, e.created_at, u.username, u.role
+       FROM file_events e JOIN users u ON u.id = e.user_id
+       WHERE e.file_id = ? ORDER BY e.created_at, e.id`,
+      [fileId]
+    );
+    return json(rows);
   } finally {
     await db.end();
   }
@@ -356,8 +390,17 @@ export default {
       const session = await requireSession(request, env);
       if (!session) return json({ error: 'No autenticado' }, 401);
 
+      if (path === '/api/me' && request.method === 'GET') {
+        return json({ id: session.userId, username: session.username, role: session.role });
+      }
+
       if (path === '/api/files/upload' && request.method === 'POST') {
         return await handleUpload(request, env, session);
+      }
+
+      const eventsMatch = path.match(/^\/api\/files\/(\d+)\/events$/);
+      if (eventsMatch && request.method === 'GET') {
+        return await handleFileEvents(eventsMatch[1], env, session);
       }
 
       if (path === '/api/files' && request.method === 'GET') {
