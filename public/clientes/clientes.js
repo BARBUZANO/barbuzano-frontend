@@ -1,96 +1,54 @@
 /* ==========================================================
-   Área de clientes — MOCK de datos.
-   Todo lo marcado con "TODO backend" es lo que habrá que
-   sustituir por llamadas fetch() a los endpoints del Worker
-   (files, folders, file_events) cuando el VPS esté listo.
+   Área de clientes — conectada al Worker (/api/*)
 
-   Contrato de datos previsto:
-   - user:   { id, username, role: 'admin' | 'cliente' }
-   - client: { id, username, display_name }
-   - folder: { id, client_id, name }
-   - file:   {
-       id, folder_id, name, size, mime,
-       direction: 'to_client' | 'to_admin',
-       uploaded_by, uploaded_at, opened_at,
-       status: 'nuevo' | 'abierto' | 'aceptado' | 'rechazado',
-       history: [{ label, date, comment? }]
-     }
-   ========================================================== */
+   Endpoints usados:
+     GET   /api/me                      (nuevo, opcional: ver notas)
+     GET   /api/clients                 (solo admin)
+     GET   /api/folders?direction=&client_id=
+     POST  /api/folders                 { name, client_id }
+     GET   /api/files?direction=&folder_id=&client_id=
+     POST  /api/files/upload            (multipart: file, folder_id, client_id)
+     GET   /api/files/:id/download
+     GET   /api/files/:id/events        (nuevo)
+     PATCH /api/files/:id/status        { status, comment }
+     POST  /api/logout
+
+   Direcciones del servidor:
+     'cliente_a_asesoria' | 'asesoria_a_cliente'
+   Las pestañas son relativas a quien mira:
+     Enviados  = lo que subo yo
+     Recibidos = lo que me suben a mí
+========================================================== */
 
 (() => {
-  // ---------- Estado de la demo (rol activo, simulado) ----------
-  let currentRole = 'cliente'; // 'cliente' | 'admin'
-  let currentClientId = 'c1';
-  let currentFolderId = 'f1';
-  let currentTab = 'enviados'; // 'enviados' | 'recibidos'
+  'use strict';
 
-  // ---------- Datos simulados ----------
-  // TODO backend: sustituir por GET /api/clients (solo admin)
-  const CLIENTS = [
-    { id: 'c1', username: 'sebas', display_name: 'Sebas (tú)' },
-    { id: 'c2', username: 'panaderia-lola', display_name: 'Panadería Lola' },
-    { id: 'c3', username: 'garaje-nunez', display_name: 'Garaje Núñez' },
-  ];
+  const API = '/api';
+  const MAX_SIZE = 15 * 1024 * 1024; // 15 MB
+  const ALLOWED_EXT = ['pdf', 'jpg', 'jpeg', 'png'];
 
-  // TODO backend: sustituir por GET /api/folders?client_id=
-  const FOLDERS = {
-    c1: [
-      { id: 'f1', name: 'General' },
-      { id: 'f2', name: 'IRPF 2025' },
-    ],
-    c2: [
-      { id: 'f3', name: 'General' },
-      { id: 'f4', name: 'Nóminas' },
-    ],
-    c3: [
-      { id: 'f5', name: 'General' },
-    ],
+  // ---------- Estado ----------
+  const state = {
+    me: null,            // { role, username, id? }
+    clients: [],         // solo admin: [{ id, username }]
+    clientId: null,      // solo admin: cliente seleccionado
+    tab: 'enviados',     // 'enviados' | 'recibidos'
+    folderId: null,      // null = "General" (raíz, sin carpeta)
+    folders: [],
+    files: [],
+    activeFileId: null,
+    previewUrl: null,    // blob: URL a liberar al cerrar el modal
+    modalToken: 0,       // invalida respuestas tardías del modal
+    loadToken: 0,        // invalida respuestas tardías de las listas
   };
-
-  // TODO backend: sustituir por GET /api/files?folder_id=
-  let FILES = [
-    {
-      id: 'file1', folder_id: 'f1', name: 'modelo-303-t3.pdf', size: '412 KB', mime: 'pdf',
-      direction: 'to_admin', uploaded_by: 'sebas',
-      uploaded_at: '2026-09-10 09:14', opened_at: '2026-09-10 11:02',
-      status: 'abierto',
-      history: [
-        { label: 'Subido por Sebas', date: '10 sep · 09:14' },
-        { label: 'Abierto por la asesoría', date: '10 sep · 11:02' },
-      ],
-    },
-    {
-      id: 'file2', folder_id: 'f1', name: 'factura-suministros-agosto.jpg', size: '1.1 MB', mime: 'jpg',
-      direction: 'to_admin', uploaded_by: 'sebas',
-      uploaded_at: '2026-09-14 18:40', opened_at: null,
-      status: 'nuevo',
-      history: [{ label: 'Subido por Sebas', date: '14 sep · 18:40' }],
-    },
-    {
-      id: 'file3', folder_id: 'f1', name: 'liquidacion-trimestral-firmada.pdf', size: '288 KB', mime: 'pdf',
-      direction: 'to_client', uploaded_by: 'asesoria',
-      uploaded_at: '2026-09-15 10:05', opened_at: null,
-      status: 'nuevo',
-      history: [{ label: 'Subido por la asesoría', date: '15 sep · 10:05' }],
-    },
-    {
-      id: 'file4', folder_id: 'f2', name: 'borrador-irpf.pdf', size: '190 KB', mime: 'pdf',
-      direction: 'to_client', uploaded_by: 'asesoria',
-      uploaded_at: '2026-09-12 12:00', opened_at: '2026-09-12 20:11',
-      status: 'aceptado',
-      history: [
-        { label: 'Subido por la asesoría', date: '12 sep · 12:00' },
-        { label: 'Abierto por el cliente', date: '12 sep · 20:11' },
-        { label: 'Aceptado por el cliente', date: '12 sep · 20:13', comment: 'Todo correcto, gracias.' },
-      ],
-    },
-  ];
 
   // ---------- Elementos ----------
   const $ = (sel) => document.querySelector(sel);
+
   const clientListEl = $('#client-list');
   const clientSwitcherSection = $('#client-switcher-section');
   const folderListEl = $('#folder-list');
+  const newFolderBtn = $('#new-folder-btn');
   const folderTitleEl = $('#folder-title');
   const contextEyebrowEl = $('#context-eyebrow');
   const fileListEl = $('#file-list');
@@ -113,305 +71,543 @@
   const commentInput = $('#file-comment-input');
   const previewEl = $('#file-preview');
 
-  let activeFileId = null;
-  let currentPreviewObjectUrl = null; // para poder liberarlo (revokeObjectURL) al cerrar
+  // ---------- Utilidades ----------
+
+  // Los nombres de archivo y carpeta los escriben los usuarios: siempre se escapan.
+  const esc = (s) =>
+    String(s ?? '').replace(/[&<>"']/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+    ));
+
+  const isAdmin = () => state.me?.role === 'admin';
+
+  function directionForTab(tab) {
+    const sentByMe = isAdmin() ? 'asesoria_a_cliente' : 'cliente_a_asesoria';
+    const receivedByMe = isAdmin() ? 'cliente_a_asesoria' : 'asesoria_a_cliente';
+    return tab === 'enviados' ? sentByMe : receivedByMe;
+  }
+
+  // ¿Soy el destinatario de este archivo?
+  const isRecipient = (file) => file.direction === directionForTab('recibidos');
+
+  const currentClient = () =>
+    state.clients.find((c) => String(c.id) === String(state.clientId));
+
+  function formatDate(value) {
+    if (!value) return '—';
+    const d = new Date(value);
+    if (isNaN(d)) return '—';
+    return d.toLocaleString('es-ES', {
+      day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit',
+    });
+  }
+
+  function formatSize(bytes) {
+    const n = Number(bytes);
+    if (!n && n !== 0) return '';
+    if (n < 1024 * 1024) return Math.max(1, Math.round(n / 1024)) + ' KB';
+    return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  }
+
+  function fileExt(file) {
+    const name = file.original_filename || '';
+    const ext = name.includes('.') ? name.split('.').pop() : '';
+    return (ext || 'file').toLowerCase();
+  }
+
+  function statusLabel(status) {
+    return {
+      nuevo: 'Nuevo',
+      abierto: 'Abierto',
+      aceptado: 'Aceptado',
+      aceptado_con_observaciones: 'Aceptado con observaciones',
+      rechazado: 'Rechazado',
+    }[status] || status;
+  }
+
+  function uploaderLabel(file) {
+    if (file.direction === 'asesoria_a_cliente') return 'La asesoría';
+    if (isAdmin()) return currentClient()?.username || 'Cliente';
+    return state.me.username || 'Tú';
+  }
+
+  function showError(message) {
+    alert(message);
+  }
+
+  // ---------- Capa de red ----------
+
+  async function api(path, options = {}) {
+    const res = await fetch(API + path, { credentials: 'same-origin', ...options });
+    if (res.status === 401) {
+      // Sesión caducada o inexistente: de vuelta a la página de inicio.
+      window.location.href = '/';
+      throw new Error('Sesión caducada');
+    }
+    return res;
+  }
+
+  async function apiJson(path, options) {
+    const res = await api(path, options);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+    return data;
+  }
+
+  async function loadMe() {
+    try {
+      return await apiJson('/me');
+    } catch (e) {
+      // Si /api/me aún no existe en el Worker, deducimos el rol:
+      // /api/clients responde 200 solo a administradores.
+      const res = await api('/clients');
+      return res.ok
+        ? { role: 'admin', username: 'Administrador' }
+        : { role: 'cliente', username: 'Cliente' };
+    }
+  }
+
+  // ---------- Carga de datos ----------
+
+  function clientQuery(q) {
+    if (isAdmin()) q.set('client_id', state.clientId);
+    return q;
+  }
+
+  async function fetchFolders() {
+    if (isAdmin() && state.clientId == null) return [];
+    const q = clientQuery(new URLSearchParams({ direction: directionForTab(state.tab) }));
+    return apiJson('/folders?' + q);
+  }
+
+  async function fetchFiles() {
+    if (isAdmin() && state.clientId == null) return [];
+    const q = clientQuery(new URLSearchParams({ direction: directionForTab(state.tab) }));
+    if (state.folderId != null) q.set('folder_id', state.folderId);
+    return apiJson('/files?' + q);
+  }
+
+  // Recarga carpetas + archivos (cambio de cliente, pestaña o carpeta nueva)
+  async function refresh() {
+    const token = ++state.loadToken;
+    try {
+      const folders = await fetchFolders();
+      if (token !== state.loadToken) return;
+      state.folders = folders;
+      if (state.folderId != null && !folders.some((f) => f.id === state.folderId)) {
+        state.folderId = null;
+      }
+      const files = await fetchFiles();
+      if (token !== state.loadToken) return;
+      state.files = files;
+    } catch (e) {
+      if (token === state.loadToken) showError(e.message);
+    }
+    renderAll();
+  }
+
+  // Recarga solo los archivos (tras subir, abrir o resolver)
+  async function reloadFiles() {
+    const token = ++state.loadToken;
+    try {
+      const files = await fetchFiles();
+      if (token !== state.loadToken) return;
+      state.files = files;
+    } catch (e) {
+      if (token === state.loadToken) showError(e.message);
+    }
+    renderFiles();
+  }
+
+  // ---------- Render: usuario ----------
+  function renderUser() {
+    const name = state.me.username || '?';
+    userAvatarEl.textContent = name.charAt(0).toUpperCase();
+    userNameEl.textContent = isAdmin() ? `${name} (admin)` : name;
+  }
 
   // ---------- Render: selector de clientes (solo admin) ----------
   function renderClients() {
-    clientSwitcherSection.hidden = currentRole !== 'admin';
-    if (currentRole !== 'admin') return;
-
-    clientListEl.innerHTML = CLIENTS.map((c) => `
+    clientSwitcherSection.hidden = !isAdmin();
+    if (!isAdmin()) return;
+    clientListEl.innerHTML = state.clients.map((c) => `
       <li>
-        <button type="button" data-client="${c.id}" class="${c.id === currentClientId ? 'is-active' : ''}">
-          ${c.display_name}
+        <button type="button" data-client="${esc(c.id)}"
+                class="${String(c.id) === String(state.clientId) ? 'is-active' : ''}">
+          ${esc(c.username)}
         </button>
       </li>
     `).join('');
   }
 
-  // ---------- Render: carpetas del cliente activo ----------
+  // ---------- Render: carpetas ----------
   function renderFolders() {
-    const folders = FOLDERS[currentClientId] || [];
-    if (!folders.find((f) => f.id === currentFolderId)) {
-      currentFolderId = folders[0]?.id;
-    }
+    const items = [{ id: null, name: 'General' }, ...state.folders];
+    const activeKey = state.folderId == null ? 'root' : String(state.folderId);
 
-    folderListEl.innerHTML = folders.map((f) => {
-      const hasUnread = FILES.some((file) =>
-        file.folder_id === f.id && file.status === 'nuevo' && isRelevantDirection(file)
-      );
+    folderListEl.innerHTML = items.map((f) => {
+      const key = f.id == null ? 'root' : String(f.id);
       return `
         <li>
-          <button type="button" data-folder="${f.id}" class="${f.id === currentFolderId ? 'is-active' : ''}">
-            <span>${f.name}</span>
-            ${hasUnread ? '<span class="folder-unread"></span>' : ''}
+          <button type="button" data-folder="${key}" class="${key === activeKey ? 'is-active' : ''}">
+            <span>${esc(f.name)}</span>
           </button>
         </li>
       `;
     }).join('');
 
-    const activeFolder = folders.find((f) => f.id === currentFolderId);
-    folderTitleEl.textContent = activeFolder ? activeFolder.name : '—';
-    contextEyebrowEl.textContent = currentRole === 'admin'
-      ? CLIENTS.find((c) => c.id === currentClientId)?.display_name || 'Carpeta'
+    const active = items.find((f) => (f.id == null ? 'root' : String(f.id)) === activeKey);
+    folderTitleEl.textContent = active ? active.name : '—';
+
+    contextEyebrowEl.textContent = isAdmin()
+      ? (currentClient()?.username || 'Sin clientes')
       : 'Carpeta';
+
+    // Las carpetas se crean siempre en la dirección "enviados" de quien las crea.
+    newFolderBtn.style.display = state.tab === 'enviados' ? '' : 'none';
   }
 
-  // Un archivo es relevante para la pestaña activa según quién lo subió
-  function isRelevantDirection(file) {
-    if (currentTab === 'enviados') return file.direction === 'to_admin';
-    return file.direction === 'to_client';
-  }
-
-  // ---------- Render: lista de archivos ----------
-  function renderFiles() {
-    const files = FILES.filter((f) => f.folder_id === currentFolderId && isRelevantDirection(f));
-
-    dropzoneEl.style.display = currentTab === 'enviados' ? 'flex' : 'none';
-    emptyStateEl.hidden = files.length > 0;
-    fileListEl.innerHTML = files.map(fileRowTemplate).join('');
-  }
-
+  // ---------- Render: archivos ----------
   function fileRowTemplate(file) {
-    const isUnread = file.status === 'nuevo' && shouldShowUnreadFor(file);
+    const isUnread = file.status === 'nuevo' && isRecipient(file);
     return `
-      <li class="file-row" data-file="${file.id}" tabindex="0">
-        <span class="file-icon">${file.mime.toUpperCase()}</span>
+      <li class="file-row" data-file="${esc(file.id)}" tabindex="0">
+        <span class="file-icon">${esc(fileExt(file).toUpperCase())}</span>
         <div class="file-info">
           <p class="file-name">
             ${isUnread ? '<span class="unread-dot"></span>' : ''}
-            ${file.name}
+            ${esc(file.original_filename)}
           </p>
-          <p class="file-sub">${file.size} · ${file.uploaded_at}</p>
+          <p class="file-sub">${esc(formatSize(file.size_bytes))} · ${esc(formatDate(file.created_at))}</p>
         </div>
-        <span class="status-pill status-${file.status}">${statusLabel(file.status)}</span>
+        <span class="status-pill status-${esc(file.status)}">${esc(statusLabel(file.status))}</span>
       </li>
     `;
   }
 
-  // El punto de "nuevo" solo tiene sentido para quien lo recibe, no para quien lo sube
-  function shouldShowUnreadFor(file) {
-    if (currentRole === 'admin') return file.direction === 'to_admin';
-    return file.direction === 'to_client';
+  function renderFiles() {
+    dropzoneEl.style.display = state.tab === 'enviados' && !(isAdmin() && state.clientId == null)
+      ? 'flex' : 'none';
+
+    emptyStateEl.textContent = isAdmin() && state.clientId == null
+      ? 'Todavía no hay clientes dados de alta.'
+      : 'No hay archivos en esta carpeta todavía.';
+    emptyStateEl.hidden = state.files.length > 0;
+
+    fileListEl.innerHTML = state.files.map(fileRowTemplate).join('');
   }
 
-  function statusLabel(status) {
-    return { nuevo: 'Nuevo', abierto: 'Abierto', aceptado: 'Aceptado', rechazado: 'Rechazado' }[status] || status;
+  function renderTabs() {
+    document.querySelectorAll('.tab').forEach((t) =>
+      t.classList.toggle('is-active', t.dataset.tab === state.tab)
+    );
   }
 
   function renderAll() {
     renderClients();
     renderFolders();
+    renderTabs();
     renderFiles();
-    userAvatarEl.textContent = currentRole === 'admin' ? 'A' : 'S';
-    userNameEl.textContent = currentRole === 'admin' ? 'Barbuzano (admin)' : 'Sebas';
   }
 
-  // ---------- Interacción: cambio de rol demo ----------
-  $('#demo-switch').addEventListener('click', (e) => {
-    const btn = e.target.closest('.demo-opt');
-    if (!btn) return;
-    currentRole = btn.dataset.role;
-    currentClientId = 'c1';
-    document.querySelectorAll('.demo-opt').forEach((b) => b.classList.toggle('is-active', b === btn));
-    renderAll();
-  });
-
-  // ---------- Interacción: cambio de cliente (admin) ----------
+  // ---------- Interacción: cliente (admin) ----------
   clientListEl.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-client]');
     if (!btn) return;
-    currentClientId = btn.dataset.client;
-    currentFolderId = null;
-    renderAll();
+    state.clientId = btn.dataset.client;
+    state.folderId = null;
+    refresh();
   });
 
-  // ---------- Interacción: cambio de carpeta ----------
+  // ---------- Interacción: carpeta ----------
   folderListEl.addEventListener('click', (e) => {
     const btn = e.target.closest('button[data-folder]');
     if (!btn) return;
-    currentFolderId = btn.dataset.folder;
+    state.folderId = btn.dataset.folder === 'root' ? null : Number(btn.dataset.folder);
     renderFolders();
-    renderFiles();
+    reloadFiles();
   });
 
-  // ---------- Interacción: pestañas Enviados / Recibidos ----------
+  // ---------- Interacción: pestañas ----------
   tabsEl.addEventListener('click', (e) => {
     const btn = e.target.closest('.tab');
-    if (!btn) return;
-    currentTab = btn.dataset.tab;
-    document.querySelectorAll('.tab').forEach((t) => t.classList.toggle('is-active', t === btn));
-    renderFolders();
-    renderFiles();
+    if (!btn || btn.dataset.tab === state.tab) return;
+    state.tab = btn.dataset.tab;
+    state.folderId = null;
+    refresh();
   });
 
   // ---------- Interacción: nueva carpeta ----------
-  $('#new-folder-btn').addEventListener('click', () => {
-    const name = prompt('Nombre de la nueva carpeta:');
+  newFolderBtn.addEventListener('click', async () => {
+    if (isAdmin() && state.clientId == null) return;
+    const name = (prompt('Nombre de la nueva carpeta:') || '').trim();
     if (!name) return;
-    const id = 'f' + Math.random().toString(36).slice(2, 7);
-    // TODO backend: POST /api/folders { client_id, name }
-    FOLDERS[currentClientId] = FOLDERS[currentClientId] || [];
-    FOLDERS[currentClientId].push({ id, name });
-    currentFolderId = id;
-    renderFolders();
-    renderFiles();
+
+    try {
+      const body = { name };
+      if (isAdmin()) body.client_id = state.clientId;
+      const { folderId } = await apiJson('/folders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      state.folderId = folderId;
+      await refresh();
+    } catch (e) {
+      showError(e.message);
+    }
   });
 
-  // ---------- Interacción: subir archivo (dropzone) ----------
+  // ---------- Interacción: subir archivo ----------
   dropzoneEl.addEventListener('click', () => fileInputEl.click());
   dropzoneEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); fileInputEl.click(); }
   });
-  dropzoneEl.addEventListener('dragover', (e) => { e.preventDefault(); dropzoneEl.classList.add('is-dragover'); });
+  dropzoneEl.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropzoneEl.classList.add('is-dragover');
+  });
   dropzoneEl.addEventListener('dragleave', () => dropzoneEl.classList.remove('is-dragover'));
   dropzoneEl.addEventListener('drop', (e) => {
     e.preventDefault();
     dropzoneEl.classList.remove('is-dragover');
-    if (e.dataTransfer.files.length) addMockFile(e.dataTransfer.files[0]);
+    if (e.dataTransfer.files.length) uploadFile(e.dataTransfer.files[0]);
   });
   fileInputEl.addEventListener('change', () => {
-    if (fileInputEl.files.length) addMockFile(fileInputEl.files[0]);
+    if (fileInputEl.files.length) uploadFile(fileInputEl.files[0]);
     fileInputEl.value = '';
   });
 
-  function addMockFile(file) {
-    // TODO backend: POST /api/files (multipart) al bucket R2 + INSERT en tabla files
-    const ext = (file.name.split('.').pop() || 'file').toLowerCase();
-    const now = new Date().toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-    const uploader = currentRole === 'admin' ? 'asesoria' : 'sebas';
-    FILES.unshift({
-      id: 'file' + Math.random().toString(36).slice(2, 7),
-      folder_id: currentFolderId,
-      name: file.name,
-      size: (file.size / 1024).toFixed(0) + ' KB',
-      mime: ext,
-      direction: currentRole === 'admin' ? 'to_client' : 'to_admin',
-      uploaded_by: uploader,
-      uploaded_at: now,
-      opened_at: null,
-      status: 'nuevo',
-      // Solo en esta demo: como el archivo se ha elegido de verdad en el navegador,
-      // podemos generar una URL local para previsualizarlo. Cuando el archivo venga
-      // de R2, aquí irá la URL real de descarga/preview servida por el Worker.
-      previewUrl: (ext === 'pdf' || ext === 'jpg' || ext === 'jpeg' || ext === 'png')
-        ? URL.createObjectURL(file)
-        : null,
-      history: [{ label: `Subido por ${uploader === 'sebas' ? 'Sebas' : 'la asesoría'}`, date: now }],
-    });
-    renderFolders();
-    renderFiles();
+  async function uploadFile(file) {
+    // El atributo accept del input no se aplica al arrastrar y soltar: se valida aquí.
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    if (!ALLOWED_EXT.includes(ext)) {
+      return showError('Solo se admiten archivos PDF, JPG o PNG.');
+    }
+    if (file.size > MAX_SIZE) {
+      return showError('El archivo supera el máximo de 15 MB.');
+    }
+    if (isAdmin() && state.clientId == null) {
+      return showError('Selecciona primero un cliente.');
+    }
+
+    const form = new FormData();
+    form.append('file', file);
+    if (state.folderId != null) form.append('folder_id', state.folderId);
+    if (isAdmin()) form.append('client_id', state.clientId);
+
+    dropzoneEl.style.opacity = '0.5';
+    dropzoneEl.style.pointerEvents = 'none';
+    try {
+      // Sin cabecera Content-Type: el navegador añade el boundary del multipart.
+      const res = await api('/files/upload', { method: 'POST', body: form });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || `Error ${res.status}`);
+      await reloadFiles();
+    } catch (e) {
+      showError(e.message);
+    } finally {
+      dropzoneEl.style.opacity = '';
+      dropzoneEl.style.pointerEvents = '';
+    }
   }
 
-  // ---------- Interacción: abrir modal de detalle ----------
+  // ---------- Modal de detalle ----------
   fileListEl.addEventListener('click', (e) => {
     const row = e.target.closest('.file-row');
     if (row) openFileModal(row.dataset.file);
   });
+  fileListEl.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter') return;
+    const row = e.target.closest('.file-row');
+    if (row) openFileModal(row.dataset.file);
+  });
 
-  function openFileModal(fileId) {
-    const file = FILES.find((f) => f.id === fileId);
-    if (!file) return;
-    activeFileId = fileId;
-
-    // Marcar como abierto si quien lo ve es el destinatario y aún está "nuevo"
-    if (file.status === 'nuevo' && shouldShowUnreadFor(file)) {
-      // TODO backend: PATCH /api/files/:id { status: 'abierto', opened_at: now }
-      file.status = 'abierto';
-      file.opened_at = new Date().toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-      file.history.push({ label: 'Abierto', date: file.opened_at });
-    }
-
-    renderPreview(file);
-
-    modalIcon.textContent = file.mime.toUpperCase();
-    modalTitle.textContent = file.name;
-    modalStatus.textContent = statusLabel(file.status);
-    modalStatus.className = 'status-pill status-' + file.status;
-    metaUploadedBy.textContent = file.uploaded_by === 'sebas' ? 'Sebas' : 'La asesoría';
-    metaUploadedAt.textContent = file.uploaded_at;
-    metaOpenedAt.textContent = file.opened_at || '— sin abrir aún —';
-    historyListEl.innerHTML = file.history.map((h) => `
-      <li><strong>${h.label}</strong><br>${h.date}${h.comment ? ` — “${h.comment}”` : ''}</li>
-    `).join('');
-
-    // Aceptar/rechazar solo tiene sentido para quien recibe el archivo
-    commentBlock.style.display = shouldShowUnreadFor(file) ? 'block' : 'none';
-    commentInput.value = '';
-
-    modalOverlay.classList.add('is-open');
-    modalOverlay.setAttribute('aria-hidden', 'false');
-    renderFolders();
-    renderFiles();
+  function setPreviewMessage(html) {
+    previewEl.innerHTML = `<div class="file-preview-placeholder">${html}</div>`;
   }
 
-  // TODO backend: cuando los archivos vengan de R2, esta función simplemente
-  // apuntará <img>/<iframe> a la URL de descarga firmada que devuelva el Worker,
-  // sin necesidad de distinguir "con preview real" vs "placeholder".
-  function renderPreview(file) {
-    if (currentPreviewObjectUrl) {
-      URL.revokeObjectURL(currentPreviewObjectUrl);
-      currentPreviewObjectUrl = null;
+  function releasePreview() {
+    if (state.previewUrl) {
+      URL.revokeObjectURL(state.previewUrl);
+      state.previewUrl = null;
     }
+  }
 
-    if (file.previewUrl) {
-      currentPreviewObjectUrl = file.previewUrl.startsWith('blob:') ? file.previewUrl : null;
-      if (file.mime === 'pdf') {
-        previewEl.innerHTML = `<iframe src="${file.previewUrl}" title="Vista previa de ${file.name}"></iframe>`;
-      } else {
-        previewEl.innerHTML = `<img src="${file.previewUrl}" alt="Vista previa de ${file.name}">`;
+  function fillModalBasics(file) {
+    modalIcon.textContent = fileExt(file).toUpperCase();
+    modalTitle.textContent = file.original_filename;
+    modalStatus.textContent = statusLabel(file.status);
+    modalStatus.className = 'status-pill status-' + file.status;
+    metaUploadedBy.textContent = uploaderLabel(file);
+    metaUploadedAt.textContent = formatDate(file.created_at);
+    metaOpenedAt.textContent = '—';
+
+    const recipient = isRecipient(file);
+    commentBlock.style.display = recipient ? 'block' : 'none';
+    commentInput.value = '';
+    commentInput.placeholder = isAdmin()
+      ? 'Escribe un comentario para el cliente…'
+      : 'Escribe un comentario para la asesoría…';
+  }
+
+  function eventLabel(ev) {
+    const who = ev.role === 'admin' ? 'la asesoría' : (ev.username || 'el cliente');
+    const verbs = {
+      subida: 'Subido por',
+      apertura: 'Abierto por',
+      aceptado: 'Aceptado por',
+      aceptado_con_observaciones: 'Aceptado con observaciones por',
+      rechazado: 'Rechazado por',
+    };
+    return `${verbs[ev.event_type] || ev.event_type} ${who}`;
+  }
+
+  function renderHistory(file, events) {
+    // Si el endpoint de eventos no está disponible, mostramos al menos la subida.
+    const list = events || [{
+      event_type: 'subida',
+      role: file.direction === 'asesoria_a_cliente' ? 'admin' : 'cliente',
+      username: uploaderLabel(file),
+      created_at: file.created_at,
+    }];
+
+    historyListEl.innerHTML = list.map((ev) => `
+      <li>
+        <strong>${esc(eventLabel(ev))}</strong><br>${esc(formatDate(ev.created_at))}${
+          ev.comment ? ` — “${esc(ev.comment)}”` : ''
+        }
+      </li>
+    `).join('');
+
+    const opened = events && events.find((ev) => ev.event_type === 'apertura');
+    metaOpenedAt.textContent = opened ? formatDate(opened.created_at) : '— sin abrir aún —';
+  }
+
+  async function openFileModal(fileId) {
+    const file = state.files.find((f) => String(f.id) === String(fileId));
+    if (!file) return;
+
+    releasePreview();
+    state.activeFileId = file.id;
+    const token = ++state.modalToken;
+
+    fillModalBasics(file);
+    historyListEl.innerHTML = '';
+    setPreviewMessage('Cargando…');
+    modalOverlay.classList.add('is-open');
+    modalOverlay.setAttribute('aria-hidden', 'false');
+
+    // 1) Descarga: el Worker marca el archivo como "abierto" al destinatario.
+    try {
+      const res = await api(`/files/${file.id}/download`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || `Error ${res.status}`);
       }
-      return;
+      const blob = await res.blob();
+      if (token !== state.modalToken) return;
+
+      state.previewUrl = URL.createObjectURL(blob);
+      previewEl.innerHTML = '';
+      const mime = file.mime_type || blob.type || '';
+      if (mime === 'application/pdf') {
+        const frame = document.createElement('iframe');
+        frame.src = state.previewUrl;
+        frame.title = `Vista previa de ${file.original_filename}`;
+        previewEl.appendChild(frame);
+      } else if (mime.startsWith('image/')) {
+        const img = document.createElement('img');
+        img.src = state.previewUrl;
+        img.alt = `Vista previa de ${file.original_filename}`;
+        previewEl.appendChild(img);
+      } else {
+        setPreviewMessage('Vista previa no disponible para este tipo de archivo.');
+      }
+    } catch (e) {
+      if (token !== state.modalToken) return;
+      setPreviewMessage('No se ha podido cargar el archivo.');
     }
 
-    previewEl.innerHTML = `
-      <div class="file-preview-placeholder">
-        Vista previa no disponible todavía en esta demo.<br>
-        Se mostrará aquí en cuanto el archivo venga del bucket real (R2).
-      </div>
-    `;
+    // 2) Historial (después de la descarga, para que incluya la apertura)
+    let events = null;
+    try {
+      events = await apiJson(`/files/${file.id}/events`);
+    } catch (e) { /* endpoint opcional: se usa el historial mínimo */ }
+    if (token !== state.modalToken) return;
+    renderHistory(file, events);
+
+    // 3) Estado actualizado (nuevo → abierto) en la lista y en el modal
+    await reloadFiles();
+    if (token !== state.modalToken) return;
+    const fresh = state.files.find((f) => f.id === file.id);
+    if (fresh) {
+      modalStatus.textContent = statusLabel(fresh.status);
+      modalStatus.className = 'status-pill status-' + fresh.status;
+    }
   }
 
   function closeFileModal() {
+    state.modalToken++;
+    state.activeFileId = null;
     modalOverlay.classList.remove('is-open');
     modalOverlay.setAttribute('aria-hidden', 'true');
-    activeFileId = null;
-    if (currentPreviewObjectUrl) {
-      URL.revokeObjectURL(currentPreviewObjectUrl);
-      currentPreviewObjectUrl = null;
-    }
+    previewEl.innerHTML = '';
+    releasePreview();
   }
 
   $('#file-modal-close').addEventListener('click', closeFileModal);
   modalOverlay.addEventListener('click', (e) => { if (e.target === modalOverlay) closeFileModal(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && modalOverlay.classList.contains('is-open')) closeFileModal();
+  });
 
-  // ---------- Interacción: aceptar / rechazar ----------
+  // ---------- Aceptar / rechazar ----------
   $('#accept-btn').addEventListener('click', () => resolveFile('aceptado'));
   $('#reject-btn').addEventListener('click', () => resolveFile('rechazado'));
 
-  function resolveFile(status) {
-    const file = FILES.find((f) => f.id === activeFileId);
-    if (!file) return;
-    // TODO backend: PATCH /api/files/:id { status, comment } → INSERT en file_events
-    file.status = status;
-    const now = new Date().toLocaleString('es-ES', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-    file.history.push({
-      label: status === 'aceptado' ? 'Aceptado' : 'Rechazado',
-      date: now,
-      comment: commentInput.value.trim() || undefined,
-    });
-    closeFileModal();
-    renderFolders();
-    renderFiles();
+  async function resolveFile(status) {
+    if (state.activeFileId == null) return;
+    const fileId = state.activeFileId;
+    const comment = commentInput.value.trim();
+
+    try {
+      await apiJson(`/files/${fileId}/status`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status, comment: comment || null }),
+      });
+      closeFileModal();
+      await reloadFiles();
+    } catch (e) {
+      showError(e.message);
+    }
   }
 
-  // ---------- Interacción: logout ----------
-  $('#logout-btn').addEventListener('click', () => {
-    // TODO backend: POST /api/logout (ya implementado en el Worker) y redirigir a "/"
-    window.location.href = '../index.html';
+  // ---------- Cerrar sesión ----------
+  $('#logout-btn').addEventListener('click', async () => {
+    try { await api('/logout', { method: 'POST' }); } catch (e) { /* da igual */ }
+    window.location.href = '/';
   });
 
   // ---------- Arranque ----------
-  renderAll();
+  async function init() {
+    // El selector de rol era solo para la maqueta.
+    document.getElementById('demo-switch')?.remove();
+
+    try {
+      state.me = await loadMe();
+      if (isAdmin()) {
+        state.clients = await apiJson('/clients');
+        state.clientId = state.clients.length ? state.clients[0].id : null;
+      }
+    } catch (e) {
+      return showError(e.message);
+    }
+
+    renderUser();
+    await refresh();
+  }
+
+  init();
 })();
