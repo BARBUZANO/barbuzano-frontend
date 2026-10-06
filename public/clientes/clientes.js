@@ -32,7 +32,7 @@
     me: null,            // { role, username, id? }
     clients: [],         // solo admin: [{ id, username }]
     clientId: null,      // solo admin: cliente seleccionado
-    tab: 'enviados',     // 'enviados' | 'recibidos'
+    tab: 'todos',        // 'todos' | 'enviados' | 'recibidos' (solo filtra archivos)
     folderId: null,      // null = "General" (raíz, sin carpeta)
     folders: [],
     files: [],
@@ -81,14 +81,18 @@
 
   const isAdmin = () => state.me?.role === 'admin';
 
+  const SENT_BY_ME = () => (isAdmin() ? 'asesoria_a_cliente' : 'cliente_a_asesoria');
+  const RECEIVED_BY_ME = () => (isAdmin() ? 'cliente_a_asesoria' : 'asesoria_a_cliente');
+
+  // 'todos' => null (sin filtro de dirección)
   function directionForTab(tab) {
-    const sentByMe = isAdmin() ? 'asesoria_a_cliente' : 'cliente_a_asesoria';
-    const receivedByMe = isAdmin() ? 'cliente_a_asesoria' : 'asesoria_a_cliente';
-    return tab === 'enviados' ? sentByMe : receivedByMe;
+    if (tab === 'enviados') return SENT_BY_ME();
+    if (tab === 'recibidos') return RECEIVED_BY_ME();
+    return null;
   }
 
-  // ¿Soy el destinatario de este archivo?
-  const isRecipient = (file) => file.direction === directionForTab('recibidos');
+  // ¿Soy el destinatario de este archivo? (depende del archivo, no de la pestaña)
+  const isRecipient = (file) => file.direction === RECEIVED_BY_ME();
 
   const currentClient = () =>
     state.clients.find((c) => String(c.id) === String(state.clientId));
@@ -176,13 +180,15 @@
 
   async function fetchFolders() {
     if (isAdmin() && state.clientId == null) return [];
-    const q = clientQuery(new URLSearchParams({ direction: directionForTab(state.tab) }));
+    const q = clientQuery(new URLSearchParams());
     return apiJson('/folders?' + q);
   }
 
   async function fetchFiles() {
     if (isAdmin() && state.clientId == null) return [];
-    const q = clientQuery(new URLSearchParams({ direction: directionForTab(state.tab) }));
+    const q = clientQuery(new URLSearchParams());
+    const dir = directionForTab(state.tab);
+    if (dir) q.set('direction', dir);
     if (state.folderId != null) q.set('folder_id', state.folderId);
     return apiJson('/files?' + q);
   }
@@ -263,8 +269,6 @@
       ? (currentClient()?.username || 'Sin clientes')
       : 'Carpeta';
 
-    // Las carpetas se crean siempre en la dirección "enviados" de quien las crea.
-    newFolderBtn.style.display = state.tab === 'enviados' ? '' : 'none';
   }
 
   // ---------- Render: archivos ----------
@@ -278,7 +282,7 @@
             ${isUnread ? '<span class="unread-dot"></span>' : ''}
             ${esc(file.original_filename)}
           </p>
-          <p class="file-sub">${esc(formatSize(file.size_bytes))} · ${esc(formatDate(file.created_at))}</p>
+          <p class="file-sub">${esc(isRecipient(file) ? 'Recibido' : 'Enviado')} · ${esc(formatSize(file.size_bytes))} · ${esc(formatDate(file.created_at))}</p>
         </div>
         <span class="status-pill status-${esc(file.status)}">${esc(statusLabel(file.status))}</span>
       </li>
@@ -286,8 +290,7 @@
   }
 
   function renderFiles() {
-    dropzoneEl.style.display = state.tab === 'enviados' && !(isAdmin() && state.clientId == null)
-      ? 'flex' : 'none';
+    dropzoneEl.style.display = !(isAdmin() && state.clientId == null) ? 'flex' : 'none';
 
     emptyStateEl.textContent = isAdmin() && state.clientId == null
       ? 'Todavía no hay clientes dados de alta.'
@@ -333,8 +336,8 @@
     const btn = e.target.closest('.tab');
     if (!btn || btn.dataset.tab === state.tab) return;
     state.tab = btn.dataset.tab;
-    state.folderId = null;
-    refresh();
+    renderTabs();
+    reloadFiles();
   });
 
   // ---------- Interacción: nueva carpeta ----------
