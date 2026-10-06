@@ -135,21 +135,24 @@ async function handleUpload(request, env, session) {
 }
 
 async function handleList(url, env, session) {
-  const direction = url.searchParams.get('direction');
+  const direction = url.searchParams.get('direction'); // opcional: sin él, devuelve ambas
   const folderId = url.searchParams.get('folder_id');
   const clientIdParam = url.searchParams.get('client_id');
-  if (!direction) return json({ error: 'Falta direction' }, 400);
 
   const clientId = session.role === 'admin' && clientIdParam ? clientIdParam : session.userId;
 
+  const where = ['client_id = ?'];
+  const params = [clientId];
+  if (direction) { where.push('direction = ?'); params.push(direction); }
+  if (folderId) { where.push('folder_id = ?'); params.push(folderId); }
+  else { where.push('folder_id IS NULL'); }
+
   const db = await getDbConnection(env);
   try {
-    const query = folderId
-      ? `SELECT * FROM files WHERE client_id = ? AND direction = ? AND folder_id = ? ORDER BY created_at DESC`
-      : `SELECT * FROM files WHERE client_id = ? AND direction = ? AND folder_id IS NULL ORDER BY created_at DESC`;
-    const params = folderId ? [clientId, direction, folderId] : [clientId, direction];
-
-    const [rows] = await db.query(query, params);
+    const [rows] = await db.query(
+      `SELECT * FROM files WHERE ${where.join(' AND ')} ORDER BY created_at DESC`,
+      params
+    );
     return json(rows);
   } finally {
     await db.end();
@@ -270,42 +273,26 @@ async function handleFolderCreate(request, env, session) {
 }
 
 async function handleFolderList(url, env, session) {
-  const direction = url.searchParams.get('direction');
   const clientIdParam = url.searchParams.get('client_id');
 
   const db = await getDbConnection(env);
   try {
-    // Cliente: solo ve sus propias carpetas.
-    if (session.role !== 'admin') {
-      const query = direction
-        ? `SELECT * FROM folders WHERE client_id = ? AND direction = ? ORDER BY name`
-        : `SELECT * FROM folders WHERE client_id = ? ORDER BY name`;
-      const params = direction ? [session.userId, direction] : [session.userId];
-      const [rows] = await db.query(query, params);
+    // Admin sin client_id: carpetas de todos los clientes.
+    if (session.role === 'admin' && !clientIdParam) {
+      const [rows] = await db.query(
+        `SELECT folders.*, users.username AS client_username
+         FROM folders JOIN users ON users.id = folders.client_id
+         ORDER BY users.username, folders.name`
+      );
       return json(rows);
     }
 
-    // Admin sin client_id: todas las carpetas de todos los clientes,
-    // para la pantalla única de administración.
-    if (!clientIdParam) {
-      const query = direction
-        ? `SELECT folders.*, users.username AS client_username
-           FROM folders JOIN users ON users.id = folders.client_id
-           WHERE folders.direction = ? ORDER BY users.username, folders.name`
-        : `SELECT folders.*, users.username AS client_username
-           FROM folders JOIN users ON users.id = folders.client_id
-           ORDER BY users.username, folders.name`;
-      const params = direction ? [direction] : [];
-      const [rows] = await db.query(query, params);
-      return json(rows);
-    }
-
-    // Admin con client_id: carpetas de ese cliente concreto.
-    const query = direction
-      ? `SELECT * FROM folders WHERE client_id = ? AND direction = ? ORDER BY name`
-      : `SELECT * FROM folders WHERE client_id = ? ORDER BY name`;
-    const params = direction ? [clientIdParam, direction] : [clientIdParam];
-    const [rows] = await db.query(query, params);
+    // Cliente: solo las suyas. Admin con client_id: las de ese cliente.
+    const clientId = session.role === 'admin' ? clientIdParam : session.userId;
+    const [rows] = await db.query(
+      'SELECT * FROM folders WHERE client_id = ? ORDER BY name',
+      [clientId]
+    );
     return json(rows);
   } finally {
     await db.end();
