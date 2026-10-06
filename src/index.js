@@ -93,6 +93,8 @@ function isRecipient(file, session) {
   return (session.role === 'admin') === (file.direction === 'cliente_a_asesoria');
 }
 
+const DELETE_STATES = ['eliminacion_solicitada', 'eliminado'];
+
 // ---------- Endpoints de archivos ----------
 
 async function handleUpload(request, env, session) {
@@ -138,19 +140,28 @@ async function handleList(url, env, session) {
   const direction = url.searchParams.get('direction'); // opcional: sin él, devuelve ambas
   const folderId = url.searchParams.get('folder_id');
   const clientIdParam = url.searchParams.get('client_id');
+  // Solo el admin puede ver los archivos eliminados (se conservan como histórico).
+  const deleted = url.searchParams.get('deleted') === '1' && session.role === 'admin';
 
   const clientId = session.role === 'admin' && clientIdParam ? clientIdParam : session.userId;
 
-  const where = ['client_id = ?'];
+  const where = ['files.client_id = ?'];
   const params = [clientId];
-  if (direction) { where.push('direction = ?'); params.push(direction); }
-  if (folderId) { where.push('folder_id = ?'); params.push(folderId); }
-  else { where.push('folder_id IS NULL'); }
+  if (deleted) {
+    where.push("files.status = 'eliminado'");
+  } else {
+    where.push("files.status <> 'eliminado'");
+    if (direction) { where.push('files.direction = ?'); params.push(direction); }
+    if (folderId) { where.push('files.folder_id = ?'); params.push(folderId); }
+    else { where.push('files.folder_id IS NULL'); }
+  }
 
   const db = await getDbConnection(env);
   try {
     const [rows] = await db.query(
-      `SELECT * FROM files WHERE ${where.join(' AND ')} ORDER BY created_at DESC`,
+      `SELECT files.*, ru.role AS delete_requested_by_role
+       FROM files LEFT JOIN users ru ON ru.id = files.delete_requested_by
+       WHERE ${where.join(' AND ')} ORDER BY files.created_at DESC`,
       params
     );
     return json(rows);
@@ -168,6 +179,9 @@ async function handleDownload(fileId, env, session) {
     if (!file) return json({ error: 'No encontrado' }, 404);
     if (session.role !== 'admin' && file.client_id !== session.userId) {
       return json({ error: 'No autorizado' }, 403);
+    }
+    if (file.status === 'eliminado' && session.role !== 'admin') {
+      return json({ error: 'No encontrado' }, 404);
     }
 
     const object = await env.BARBUZANO_FILES.get(file.r2_key);
@@ -207,6 +221,9 @@ async function handleStatusUpdate(fileId, request, env, session) {
     if (session.role !== 'admin' && file.client_id !== session.userId) {
       return json({ error: 'No autorizado' }, 403);
     }
+    if (DELETE_STATES.includes(file.status)) {
+      return json({ error: 'El archivo está pendiente de eliminación o eliminado' }, 409);
+    }
     // Solo quien recibe el archivo puede aceptarlo o rechazarlo.
     if (!isRecipient(file, session)) {
       return json({ error: 'Solo el destinatario puede resolver este archivo' }, 403);
@@ -241,6 +258,123 @@ async function handleFileEvents(fileId, env, session) {
       [fileId]
     );
     return json(rows);
+  } finally {
+    await db.end();
+  }
+}
+
+// Carga el archivo y comprueba que la sesión tiene acceso (admin, o el cliente dueño).
+async function loadAccessibleFile(db, fileId, session) {
+  const [rows] = await db.query('SELECT * FROM files WHERE id = ?', [fileId]);
+  const file = rows[0];
+  if (!file) return { error: json({ error: 'No encontrado' }, 404) };
+  if (session.role !== 'admin' && file.client_id !== session.userId) {
+    return { error: json({ error: 'No autorizado' }, 403) };
+  }
+  return { file };
+}
+
+// Comentario suelto: lo pueden dejar el cliente y la asesoría sobre cualquier archivo suyo.
+async function handleComment(fileId, request, env, session) {
+  const { comment } = await request.json();
+  const text = (comment || '').trim();
+  if (!text) return json({ error: 'El comentario está vacío' }, 400);
+  if (text.length > 1000) return json({ error: 'El comentario supera los 1000 caracteres' }, 400);
+
+  const db = await getDbConnection(env);
+  try {
+    const { file, error } = await loadAccessibleFile(db, fileId, session);
+    if (error) return error;
+    if (file.status === 'eliminado') return json({ error: 'El archivo está eliminado' }, 409);
+
+    await db.query(
+      `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, 'comentario', ?)`,
+      [fileId, session.userId, text]
+    );
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+// Cualquiera de las dos partes puede pedir la eliminación; la otra debe confirmarla.
+async function handleDeleteRequest(fileId, request, env, session) {
+  const body = await request.json().catch(() => ({}));
+  const comment = (body.comment || '').trim() || null;
+
+  const db = await getDbConnection(env);
+  try {
+    const { file, error } = await loadAccessibleFile(db, fileId, session);
+    if (error) return error;
+    if (DELETE_STATES.includes(file.status)) {
+      return json({ error: 'La eliminación de este archivo ya está solicitada o hecha' }, 409);
+    }
+
+    const [result] = await db.query(
+      `UPDATE files SET status_before_delete = ?, status = 'eliminacion_solicitada', delete_requested_by = ?
+       WHERE id = ? AND status = ?`,
+      [file.status, session.userId, fileId, file.status]
+    );
+    if (result.affectedRows === 0) return json({ error: 'El archivo ha cambiado, recarga' }, 409);
+
+    await db.query(
+      `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, 'eliminacion_solicitada', ?)`,
+      [fileId, session.userId, comment]
+    );
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+// accept / reject: solo la parte contraria a quien la pidió. cancel: solo quien la pidió.
+async function handleDeleteResponse(fileId, request, env, session) {
+  const { action, comment } = await request.json();
+  if (!['accept', 'reject', 'cancel'].includes(action)) return json({ error: 'Acción inválida' }, 400);
+  const note = (comment || '').trim() || null;
+
+  const db = await getDbConnection(env);
+  try {
+    const { file, error } = await loadAccessibleFile(db, fileId, session);
+    if (error) return error;
+    if (file.status !== 'eliminacion_solicitada') {
+      return json({ error: 'Este archivo no tiene una eliminación pendiente' }, 409);
+    }
+
+    const [users] = await db.query('SELECT role FROM users WHERE id = ?', [file.delete_requested_by]);
+    const requesterIsAdmin = users[0]?.role === 'admin';
+    const sameSide = requesterIsAdmin === (session.role === 'admin');
+
+    if (action === 'cancel' && !sameSide) {
+      return json({ error: 'Solo quien pidió la eliminación puede cancelarla' }, 403);
+    }
+    if (action !== 'cancel' && sameSide) {
+      return json({ error: 'La eliminación debe confirmarla la otra parte' }, 403);
+    }
+
+    let result, eventType;
+    if (action === 'accept') {
+      [result] = await db.query(
+        `UPDATE files SET status = 'eliminado' WHERE id = ? AND status = 'eliminacion_solicitada'`,
+        [fileId]
+      );
+      eventType = 'eliminado';
+    } else {
+      [result] = await db.query(
+        `UPDATE files SET status = COALESCE(status_before_delete, 'abierto'),
+                status_before_delete = NULL, delete_requested_by = NULL
+         WHERE id = ? AND status = 'eliminacion_solicitada'`,
+        [fileId]
+      );
+      eventType = action === 'reject' ? 'eliminacion_rechazada' : 'eliminacion_cancelada';
+    }
+    if (result.affectedRows === 0) return json({ error: 'El archivo ha cambiado, recarga' }, 409);
+
+    await db.query(
+      `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, ?, ?)`,
+      [fileId, session.userId, eventType, note]
+    );
+    return json({ ok: true });
   } finally {
     await db.end();
   }
@@ -402,6 +536,21 @@ export default {
       const statusMatch = path.match(/^\/api\/files\/(\d+)\/status$/);
       if (statusMatch && request.method === 'PATCH') {
         return await handleStatusUpdate(statusMatch[1], request, env, session);
+      }
+
+      const commentMatch = path.match(/^\/api\/files\/(\d+)\/comments$/);
+      if (commentMatch && request.method === 'POST') {
+        return await handleComment(commentMatch[1], request, env, session);
+      }
+
+      const deleteRequestMatch = path.match(/^\/api\/files\/(\d+)\/delete-request$/);
+      if (deleteRequestMatch && request.method === 'POST') {
+        return await handleDeleteRequest(deleteRequestMatch[1], request, env, session);
+      }
+
+      const deleteResponseMatch = path.match(/^\/api\/files\/(\d+)\/delete-response$/);
+      if (deleteResponseMatch && request.method === 'POST') {
+        return await handleDeleteResponse(deleteResponseMatch[1], request, env, session);
       }
 
       if (path === '/api/folders' && request.method === 'POST') {
