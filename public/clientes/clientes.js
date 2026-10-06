@@ -32,7 +32,7 @@
     me: null,            // { role, username, id? }
     clients: [],         // solo admin: [{ id, username }]
     clientId: null,      // solo admin: cliente seleccionado
-    tab: 'todos',        // 'todos' | 'enviados' | 'recibidos' (solo filtra archivos)
+    tab: 'todos',        // 'todos' | 'enviados' | 'recibidos' | 'eliminados' (admin)
     folderId: null,      // null = "General" (raíz, sin carpeta)
     folders: [],
     files: [],
@@ -69,6 +69,10 @@
   const historyListEl = $('#file-history-list');
   const commentBlock = $('#file-comment-block');
   const commentInput = $('#file-comment-input');
+  const commentSendBtn = $('#comment-send-btn');
+  const resolveActionsEl = $('#resolve-actions');
+  const deleteMsgEl = $('#file-delete-msg');
+  const deleteActionsEl = $('#file-delete-actions');
   const previewEl = $('#file-preview');
 
   // ---------- Utilidades ----------
@@ -126,6 +130,8 @@
       aceptado: 'Aceptado',
       aceptado_con_observaciones: 'Aceptado con observaciones',
       rechazado: 'Rechazado',
+      eliminacion_solicitada: 'Eliminación solicitada',
+      eliminado: 'Eliminado',
     }[status] || status;
   }
 
@@ -187,9 +193,13 @@
   async function fetchFiles() {
     if (isAdmin() && state.clientId == null) return [];
     const q = clientQuery(new URLSearchParams());
-    const dir = directionForTab(state.tab);
-    if (dir) q.set('direction', dir);
-    if (state.folderId != null) q.set('folder_id', state.folderId);
+    if (state.tab === 'eliminados') {
+      q.set('deleted', '1');
+    } else {
+      const dir = directionForTab(state.tab);
+      if (dir) q.set('direction', dir);
+      if (state.folderId != null) q.set('folder_id', state.folderId);
+    }
     return apiJson('/files?' + q);
   }
 
@@ -263,7 +273,9 @@
     }).join('');
 
     const active = items.find((f) => (f.id == null ? 'root' : String(f.id)) === activeKey);
-    folderTitleEl.textContent = active ? active.name : '—';
+    folderTitleEl.textContent = state.tab === 'eliminados'
+      ? 'Archivos eliminados'
+      : (active ? active.name : '—');
 
     contextEyebrowEl.textContent = isAdmin()
       ? (currentClient()?.username || 'Sin clientes')
@@ -290,7 +302,8 @@
   }
 
   function renderFiles() {
-    dropzoneEl.style.display = !(isAdmin() && state.clientId == null) ? 'flex' : 'none';
+    dropzoneEl.style.display = state.tab !== 'eliminados' && !(isAdmin() && state.clientId == null)
+      ? 'flex' : 'none';
 
     emptyStateEl.textContent = isAdmin() && state.clientId == null
       ? 'Todavía no hay clientes dados de alta.'
@@ -301,9 +314,11 @@
   }
 
   function renderTabs() {
-    document.querySelectorAll('.tab').forEach((t) =>
-      t.classList.toggle('is-active', t.dataset.tab === state.tab)
-    );
+    document.querySelectorAll('.tab').forEach((t) => {
+      t.classList.toggle('is-active', t.dataset.tab === state.tab);
+      // "Eliminados" es solo para la asesoría.
+      if (t.dataset.tab === 'eliminados') t.style.display = isAdmin() ? '' : 'none';
+    });
   }
 
   function renderAll() {
@@ -446,12 +461,43 @@
     metaUploadedAt.textContent = formatDate(file.created_at);
     metaOpenedAt.textContent = '—';
 
-    const recipient = isRecipient(file);
-    commentBlock.style.display = recipient ? 'block' : 'none';
+    const pending = file.status === 'eliminacion_solicitada';
+    const deleted = file.status === 'eliminado';
+
+    // Comentar pueden ambos; aceptar/rechazar solo el destinatario y si no hay eliminación en curso.
+    commentBlock.style.display = deleted ? 'none' : 'block';
+    resolveActionsEl.style.display = isRecipient(file) && !pending && !deleted ? 'flex' : 'none';
     commentInput.value = '';
     commentInput.placeholder = isAdmin()
       ? 'Escribe un comentario para el cliente…'
       : 'Escribe un comentario para la asesoría…';
+
+    renderDeleteBlock(file);
+  }
+
+  function renderDeleteBlock(file) {
+    const myRole = isAdmin() ? 'admin' : 'cliente';
+    let msg = '';
+    let buttons = '';
+
+    if (file.status === 'eliminado') {
+      msg = 'Este archivo está eliminado. Se conserva como histórico.';
+    } else if (file.status === 'eliminacion_solicitada') {
+      if (file.delete_requested_by_role === myRole) {
+        msg = 'Has solicitado eliminar este archivo. Falta que la otra parte lo confirme.';
+        buttons = '<button type="button" class="pill-btn outline-btn" data-delete="cancel">Cancelar solicitud</button>';
+      } else {
+        msg = 'La otra parte ha solicitado eliminar este archivo.';
+        buttons = `
+          <button type="button" class="pill-btn outline-btn" data-delete="reject">Mantener archivo</button>
+          <button type="button" class="pill-btn ghost-btn" data-delete="accept">Aceptar eliminación</button>`;
+      }
+    } else {
+      buttons = '<button type="button" class="pill-btn ghost-btn" data-delete="request">Solicitar eliminación</button>';
+    }
+
+    deleteMsgEl.textContent = msg;
+    deleteActionsEl.innerHTML = buttons;
   }
 
   function eventLabel(ev) {
@@ -462,6 +508,11 @@
       aceptado: 'Aceptado por',
       aceptado_con_observaciones: 'Aceptado con observaciones por',
       rechazado: 'Rechazado por',
+      comentario: 'Comentario de',
+      eliminacion_solicitada: 'Eliminación solicitada por',
+      eliminacion_rechazada: 'Eliminación rechazada por',
+      eliminacion_cancelada: 'Solicitud de eliminación cancelada por',
+      eliminado: 'Eliminación confirmada por',
     };
     return `${verbs[ev.event_type] || ev.event_type} ${who}`;
   }
@@ -586,6 +637,70 @@
       showError(e.message);
     }
   }
+
+  // ---------- Comentarios y eliminación ----------
+
+  // Recarga la lista y vuelve a pintar el modal con el estado actualizado.
+  async function refreshModal() {
+    const id = state.activeFileId;
+    if (id == null) return;
+    const token = state.modalToken;
+
+    await reloadFiles();
+    if (token !== state.modalToken) return;
+
+    let events = null;
+    try { events = await apiJson(`/files/${id}/events`); } catch (e) { /* opcional */ }
+    if (token !== state.modalToken) return;
+
+    const fresh = state.files.find((f) => String(f.id) === String(id));
+    if (!fresh) { closeFileModal(); return; } // ya no aparece en esta vista (p. ej. eliminado)
+    fillModalBasics(fresh);
+    renderHistory(fresh, events);
+  }
+
+  commentSendBtn.addEventListener('click', async () => {
+    if (state.activeFileId == null) return;
+    const comment = commentInput.value.trim();
+    if (!comment) return showError('Escribe un comentario antes de enviarlo.');
+    try {
+      await apiJson(`/files/${state.activeFileId}/comments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ comment }),
+      });
+      await refreshModal();
+    } catch (e) {
+      showError(e.message);
+    }
+  });
+
+  deleteActionsEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-delete]');
+    if (!btn || state.activeFileId == null) return;
+    const action = btn.dataset.delete;
+
+    const confirmations = {
+      request: '¿Solicitar la eliminación de este archivo? La otra parte tendrá que confirmarla.',
+      accept: '¿Aceptar la eliminación? El archivo dejará de aparecer en tu lista.',
+    };
+    if (confirmations[action] && !confirm(confirmations[action])) return;
+
+    const [path, body] = action === 'request'
+      ? [`/files/${state.activeFileId}/delete-request`, {}]
+      : [`/files/${state.activeFileId}/delete-response`, { action }];
+
+    try {
+      await apiJson(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      await refreshModal();
+    } catch (err) {
+      showError(err.message);
+    }
+  });
 
   // ---------- Cerrar sesión ----------
   $('#logout-btn').addEventListener('click', async () => {
