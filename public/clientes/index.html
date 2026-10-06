@@ -85,6 +85,7 @@
             <button type="button" class="tab is-active" data-tab="todos">Todos</button>
             <button type="button" class="tab" data-tab="enviados">Enviados</button>
             <button type="button" class="tab" data-tab="recibidos">Recibidos</button>
+            <button type="button" class="tab" data-tab="eliminados" style="display:none">Eliminados</button>
           </div>
         </div>
 
@@ -139,12 +140,20 @@
           <div class="file-comment" id="file-comment-block">
             <label class="login-field">
               <span>Añadir comentario</span>
-              <textarea id="file-comment-input" rows="2" placeholder="Escribe un comentario para el cliente…"></textarea>
+              <textarea id="file-comment-input" rows="2" maxlength="1000" placeholder="Escribe un comentario para el cliente…"></textarea>
             </label>
             <div class="file-modal-actions">
+              <button type="button" class="pill-btn outline-btn" id="comment-send-btn">Enviar comentario</button>
+            </div>
+            <div class="file-modal-actions" id="resolve-actions">
               <button type="button" class="pill-btn ghost-btn" id="reject-btn">Rechazar</button>
               <button type="button" class="pill-btn" id="accept-btn">Aceptar</button>
             </div>
+          </div>
+
+          <div class="file-delete" id="file-delete-block">
+            <p class="file-delete-msg" id="file-delete-msg"></p>
+            <div class="file-modal-actions" id="file-delete-actions"></div>
           </div>
         </div>
 
