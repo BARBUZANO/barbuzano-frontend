@@ -399,6 +399,8 @@ html.app, body.app {
 .status-pill.status-abierto { background: rgba(245, 245, 240, 0.08); color: var(--fg-dim); }
 .status-pill.status-aceptado { background: var(--accent); color: var(--bg); }
 .status-pill.status-rechazado { background: rgba(226, 125, 106, 0.15); color: #E27D6A; }
+.status-pill.status-eliminacion_solicitada { background: rgba(226, 185, 106, 0.15); color: #E2B96A; }
+.status-pill.status-eliminado { background: rgba(245, 245, 240, 0.05); color: var(--fg-dim); text-decoration: line-through; }
 
 .empty-state {
   color: var(--fg-dim);
@@ -609,6 +611,31 @@ html.app, body.app {
   background: rgba(226, 125, 106, 0.1);
   transform: none;
 }
+
+.pill-btn.outline-btn {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid rgba(245, 245, 240, 0.25);
+}
+
+.pill-btn.outline-btn:hover {
+  background: rgba(245, 245, 240, 0.08);
+  transform: none;
+}
+
+.file-delete {
+  margin-top: 1.4rem;
+  padding-top: 1rem;
+  border-top: 1px solid rgba(245, 245, 240, 0.1);
+}
+
+.file-delete-msg {
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+  line-height: 1.4;
+}
+
+.file-delete-msg:empty { display: none; }
 
 /* ---------- Small screens ---------- */
 
