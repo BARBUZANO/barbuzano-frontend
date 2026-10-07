@@ -80,7 +80,7 @@ async function requireSession(request, env) {
 async function folderBelongsToClient(db, folderId, clientId) {
   if (!folderId) return true;
   const [rows] = await db.query(
-    'SELECT id FROM folders WHERE id = ? AND client_id = ?',
+    "SELECT id FROM folders WHERE id = ? AND client_id = ? AND status = 'activa'",
     [folderId, clientId]
   );
   return rows.length > 0;
@@ -110,7 +110,7 @@ async function handleUpload(request, env, session) {
     if (!clientId) return json({ error: 'Falta client_id' }, 400);
 
     if (folderId && !(await folderBelongsToClient(db, folderId, clientId))) {
-      return json({ error: 'La carpeta indicada no pertenece a este cliente' }, 403);
+      return json({ error: 'La carpeta indicada no existe o no está disponible' }, 403);
     }
 
     const uuid = crypto.randomUUID();
@@ -392,7 +392,7 @@ async function handleFolderCreate(request, env, session) {
   const db = await getDbConnection(env);
   try {
     if (parent_id && !(await folderBelongsToClient(db, parent_id, clientId))) {
-      return json({ error: 'La carpeta padre no pertenece a este cliente' }, 403);
+      return json({ error: 'La carpeta padre no existe o no está disponible' }, 403);
     }
 
     const [result] = await db.query(
@@ -414,8 +414,10 @@ async function handleFolderList(url, env, session) {
     // Admin sin client_id: carpetas de todos los clientes.
     if (session.role === 'admin' && !clientIdParam) {
       const [rows] = await db.query(
-        `SELECT folders.*, users.username AS client_username
+        `SELECT folders.*, users.username AS client_username, ru.role AS delete_requested_by_role
          FROM folders JOIN users ON users.id = folders.client_id
+         LEFT JOIN users ru ON ru.id = folders.delete_requested_by
+         WHERE folders.status <> 'eliminada'
          ORDER BY users.username, folders.name`
       );
       return json(rows);
@@ -424,10 +426,111 @@ async function handleFolderList(url, env, session) {
     // Cliente: solo las suyas. Admin con client_id: las de ese cliente.
     const clientId = session.role === 'admin' ? clientIdParam : session.userId;
     const [rows] = await db.query(
-      'SELECT * FROM folders WHERE client_id = ? ORDER BY name',
+      `SELECT folders.*, ru.role AS delete_requested_by_role
+       FROM folders LEFT JOIN users ru ON ru.id = folders.delete_requested_by
+       WHERE folders.client_id = ? AND folders.status <> 'eliminada'
+       ORDER BY folders.name`,
       [clientId]
     );
     return json(rows);
+  } finally {
+    await db.end();
+  }
+}
+
+// ---------- Eliminación de carpetas (doble verificación, igual que los archivos) ----------
+
+// Carga la carpeta y comprueba que la sesión tiene acceso (admin, o el cliente dueño).
+async function loadAccessibleFolder(db, folderId, session) {
+  const [rows] = await db.query('SELECT * FROM folders WHERE id = ?', [folderId]);
+  const folder = rows[0];
+  if (!folder || folder.status === 'eliminada') return { error: json({ error: 'No encontrado' }, 404) };
+  if (session.role !== 'admin' && folder.client_id !== session.userId) {
+    return { error: json({ error: 'No autorizado' }, 403) };
+  }
+  return { folder };
+}
+
+// Una carpeta solo se puede eliminar si no contiene archivos ni subcarpetas activos.
+async function folderIsEmpty(db, folderId) {
+  const [files] = await db.query(
+    "SELECT COUNT(*) AS n FROM files WHERE folder_id = ? AND status <> 'eliminado'",
+    [folderId]
+  );
+  const [subs] = await db.query(
+    "SELECT COUNT(*) AS n FROM folders WHERE parent_id = ? AND status <> 'eliminada'",
+    [folderId]
+  );
+  return Number(files[0].n) === 0 && Number(subs[0].n) === 0;
+}
+
+const FOLDER_NOT_EMPTY = 'La carpeta debe estar vacía: elimina antes los archivos que contiene.';
+
+// Cualquiera de las dos partes puede pedir la eliminación; la otra debe confirmarla.
+async function handleFolderDeleteRequest(folderId, env, session) {
+  const db = await getDbConnection(env);
+  try {
+    const { folder, error } = await loadAccessibleFolder(db, folderId, session);
+    if (error) return error;
+    if (folder.status !== 'activa') {
+      return json({ error: 'La eliminación de esta carpeta ya está solicitada' }, 409);
+    }
+    if (!(await folderIsEmpty(db, folderId))) return json({ error: FOLDER_NOT_EMPTY }, 409);
+
+    const [result] = await db.query(
+      `UPDATE folders SET status = 'eliminacion_solicitada', delete_requested_by = ?, delete_requested_at = NOW()
+       WHERE id = ? AND status = 'activa'`,
+      [session.userId, folderId]
+    );
+    if (result.affectedRows === 0) return json({ error: 'La carpeta ha cambiado, recarga' }, 409);
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+// accept / reject: solo la parte contraria a quien la pidió. cancel: solo quien la pidió.
+async function handleFolderDeleteResponse(folderId, request, env, session) {
+  const { action } = await request.json();
+  if (!['accept', 'reject', 'cancel'].includes(action)) return json({ error: 'Acción inválida' }, 400);
+
+  const db = await getDbConnection(env);
+  try {
+    const { folder, error } = await loadAccessibleFolder(db, folderId, session);
+    if (error) return error;
+    if (folder.status !== 'eliminacion_solicitada') {
+      return json({ error: 'Esta carpeta no tiene una eliminación pendiente' }, 409);
+    }
+
+    const [users] = await db.query('SELECT role FROM users WHERE id = ?', [folder.delete_requested_by]);
+    const requesterIsAdmin = users[0]?.role === 'admin';
+    const sameSide = requesterIsAdmin === (session.role === 'admin');
+
+    if (action === 'cancel' && !sameSide) {
+      return json({ error: 'Solo quien pidió la eliminación puede cancelarla' }, 403);
+    }
+    if (action !== 'cancel' && sameSide) {
+      return json({ error: 'La eliminación debe confirmarla la otra parte' }, 403);
+    }
+
+    let result;
+    if (action === 'accept') {
+      // Se vuelve a comprobar: pudo subirse algo mientras la solicitud estaba pendiente.
+      if (!(await folderIsEmpty(db, folderId))) return json({ error: FOLDER_NOT_EMPTY }, 409);
+      [result] = await db.query(
+        `UPDATE folders SET status = 'eliminada', deleted_at = NOW()
+         WHERE id = ? AND status = 'eliminacion_solicitada'`,
+        [folderId]
+      );
+    } else {
+      [result] = await db.query(
+        `UPDATE folders SET status = 'activa', delete_requested_by = NULL, delete_requested_at = NULL
+         WHERE id = ? AND status = 'eliminacion_solicitada'`,
+        [folderId]
+      );
+    }
+    if (result.affectedRows === 0) return json({ error: 'La carpeta ha cambiado, recarga' }, 409);
+    return json({ ok: true });
   } finally {
     await db.end();
   }
@@ -559,6 +662,16 @@ export default {
 
       if (path === '/api/folders' && request.method === 'GET') {
         return await handleFolderList(url, env, session);
+      }
+
+      const folderDeleteRequestMatch = path.match(/^\/api\/folders\/(\d+)\/delete-request$/);
+      if (folderDeleteRequestMatch && request.method === 'POST') {
+        return await handleFolderDeleteRequest(folderDeleteRequestMatch[1], env, session);
+      }
+
+      const folderDeleteResponseMatch = path.match(/^\/api\/folders\/(\d+)\/delete-response$/);
+      if (folderDeleteResponseMatch && request.method === 'POST') {
+        return await handleFolderDeleteResponse(folderDeleteResponseMatch[1], request, env, session);
       }
 
       if (path === '/api/clients' && request.method === 'GET') {
