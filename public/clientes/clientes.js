@@ -104,6 +104,9 @@
   // ¿Soy el destinatario de este archivo? (depende del archivo, no de la pestaña)
   const isRecipient = (file) => file.direction === RECEIVED_BY_ME();
 
+  // Carpetas que viven en "Archivadas" (archivada, o con restauración pendiente): solo lectura.
+  const ARCHIVED_STATES = ['archivada', 'restauracion_solicitada'];
+
   const activeFolder = () =>
     state.folderId == null ? null : (state.folders.find((f) => f.id === state.folderId) || null);
 
@@ -268,8 +271,8 @@
   // ---------- Render: carpetas ----------
   function renderFolders() {
     const activeKey = state.folderId == null ? 'root' : String(state.folderId);
-    const current = state.folders.filter((f) => f.status !== 'archivada');
-    const archived = state.folders.filter((f) => f.status === 'archivada');
+    const current = state.folders.filter((f) => !ARCHIVED_STATES.includes(f.status));
+    const archived = state.folders.filter((f) => ARCHIVED_STATES.includes(f.status));
 
     const folderItem = (f) => {
       const key = f.id == null ? 'root' : String(f.id);
@@ -278,6 +281,7 @@
           <button type="button" data-folder="${key}" class="${key === activeKey ? 'is-active' : ''}">
             <span>${esc(f.name)}</span>
             ${f.status === 'archivacion_solicitada' ? '<span class="folder-pending" title="Archivado solicitado"></span>' : ''}
+            ${f.status === 'restauracion_solicitada' ? '<span class="folder-pending" title="Restauración solicitada"></span>' : ''}
           </button>
         </li>
       `;
@@ -288,7 +292,7 @@
     folderArchiveEl.hidden = archived.length === 0;
     folderArchiveCountEl.textContent = archived.length ? `(${archived.length})` : '';
     // Si la carpeta abierta está archivada, se despliega la sección para que se vea dónde está.
-    if (activeFolder()?.status === 'archivada') folderArchiveEl.open = true;
+    if (ARCHIVED_STATES.includes(activeFolder()?.status)) folderArchiveEl.open = true;
 
     const active = state.folderId == null ? { name: 'General' } : activeFolder();
     folderTitleEl.textContent = state.tab === 'eliminados'
@@ -316,7 +320,17 @@
 
     if (folder.status === 'archivada') {
       msg = 'Carpeta archivada: conserva todos sus documentos, en modo solo lectura.';
-      buttons = '<button type="button" class="pill-btn ghost-btn" data-folder-action="restore">Restaurar carpeta</button>';
+      buttons = '<button type="button" class="pill-btn ghost-btn" data-folder-action="restore">Solicitar restauración</button>';
+    } else if (folder.status === 'restauracion_solicitada') {
+      if (folder.archive_requested_by_role === myRole) {
+        msg = 'Has solicitado restaurar esta carpeta. Falta que la otra parte lo confirme.';
+        buttons = '<button type="button" class="pill-btn outline-btn" data-folder-action="restore-cancel">Cancelar solicitud</button>';
+      } else {
+        msg = 'La otra parte ha solicitado restaurar esta carpeta.';
+        buttons = `
+          <button type="button" class="pill-btn outline-btn" data-folder-action="restore-reject">Mantener archivada</button>
+          <button type="button" class="pill-btn ghost-btn" data-folder-action="restore-accept">Aceptar restauración</button>`;
+      }
     } else if (folder.status === 'archivacion_solicitada') {
       if (folder.archive_requested_by_role === myRole) {
         msg = 'Has solicitado archivar esta carpeta. Falta que la otra parte lo confirme.';
@@ -443,14 +457,18 @@
     const confirmations = {
       request: `¿Solicitar el archivado de la carpeta «${folder.name}»? La otra parte tendrá que confirmarlo. No se elimina ningún documento.`,
       accept: `¿Aceptar el archivado de la carpeta «${folder.name}»? Pasará a "Archivadas" con todos sus documentos.`,
-      restore: `¿Restaurar la carpeta «${folder.name}»? Volverá a la lista principal y se podrá modificar de nuevo.`,
+      restore: `¿Solicitar la restauración de la carpeta «${folder.name}»? La otra parte tendrá que confirmarla.`,
+      'restore-accept': `¿Aceptar la restauración de la carpeta «${folder.name}»? Volverá a la lista principal y se podrá modificar de nuevo.`,
     };
     if (confirmations[action] && !confirm(confirmations[action])) return;
 
     let path, body = {};
     if (action === 'request') path = `/folders/${folder.id}/archive-request`;
-    else if (action === 'restore') path = `/folders/${folder.id}/restore`;
-    else { path = `/folders/${folder.id}/archive-response`; body = { action }; }
+    else if (action === 'restore') path = `/folders/${folder.id}/restore-request`;
+    else if (action.startsWith('restore-')) {
+      path = `/folders/${folder.id}/restore-response`;
+      body = { action: action.slice('restore-'.length) };
+    } else { path = `/folders/${folder.id}/archive-response`; body = { action }; }
 
     try {
       await apiJson(path, {
@@ -567,7 +585,7 @@
 
   function isInArchivedFolder(file) {
     return file.folder_id != null
-      && state.folders.find((f) => f.id === file.folder_id)?.status === 'archivada';
+      && ARCHIVED_STATES.includes(state.folders.find((f) => f.id === file.folder_id)?.status);
   }
 
   function renderDeleteBlock(file) {
