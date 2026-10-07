@@ -68,6 +68,11 @@
             </button>
           </div>
           <ul class="folder-list" id="folder-list"></ul>
+
+          <details class="folder-archive" id="folder-archive" hidden>
+            <summary>Archivadas <span id="folder-archive-count"></span></summary>
+            <ul class="folder-list" id="folder-archive-list"></ul>
+          </details>
         </div>
 
       </aside>
@@ -89,9 +94,9 @@
           </div>
         </div>
 
-        <div class="folder-delete" id="folder-delete" hidden>
-          <p class="folder-delete-msg" id="folder-delete-msg"></p>
-          <div class="folder-delete-actions" id="folder-delete-actions"></div>
+        <div class="folder-action" id="folder-action" hidden>
+          <p class="folder-action-msg" id="folder-action-msg"></p>
+          <div class="folder-action-actions" id="folder-action-actions"></div>
         </div>
 
         <section class="dropzone" id="dropzone" tabindex="0" role="button" aria-label="Subir archivo">
