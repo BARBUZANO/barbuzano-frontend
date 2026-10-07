@@ -462,7 +462,7 @@ async function loadAccessibleFolder(db, folderId, session) {
 async function archivedFolderError(db, file) {
   if (!file.folder_id) return null;
   const [rows] = await db.query('SELECT status FROM folders WHERE id = ?', [file.folder_id]);
-  return rows[0]?.status === 'archivada'
+  return ['archivada', 'restauracion_solicitada'].includes(rows[0]?.status)
     ? json({ error: 'La carpeta está archivada. Restáurala para modificar sus archivos.' }, 409)
     : null;
 }
@@ -490,7 +490,8 @@ async function handleFolderArchiveRequest(folderId, env, session) {
 }
 
 // accept / reject: solo la parte contraria a quien lo pidió. cancel: solo quien lo pidió.
-async function handleFolderArchiveResponse(folderId, request, env, session) {
+// Sirve para el archivado y para la restauración; cambia solo el estado de partida y los de destino.
+async function resolveFolderRequest(folderId, request, env, session, flow) {
   const { action } = await request.json();
   if (!['accept', 'reject', 'cancel'].includes(action)) return json({ error: 'Acción inválida' }, 400);
 
@@ -498,8 +499,8 @@ async function handleFolderArchiveResponse(folderId, request, env, session) {
   try {
     const { folder, error } = await loadAccessibleFolder(db, folderId, session);
     if (error) return error;
-    if (folder.status !== 'archivacion_solicitada') {
-      return json({ error: 'Esta carpeta no tiene un archivado pendiente' }, 409);
+    if (folder.status !== flow.pending) {
+      return json({ error: flow.notPending }, 409);
     }
 
     const [users] = await db.query('SELECT role FROM users WHERE id = ?', [folder.archive_requested_by]);
@@ -507,26 +508,22 @@ async function handleFolderArchiveResponse(folderId, request, env, session) {
     const sameSide = requesterIsAdmin === (session.role === 'admin');
 
     if (action === 'cancel' && !sameSide) {
-      return json({ error: 'Solo quien pidió el archivado puede cancelarlo' }, 403);
+      return json({ error: 'Solo quien hizo la solicitud puede cancelarla' }, 403);
     }
     if (action !== 'cancel' && sameSide) {
-      return json({ error: 'El archivado debe confirmarlo la otra parte' }, 403);
+      return json({ error: 'La solicitud debe confirmarla la otra parte' }, 403);
     }
 
-    let result;
-    if (action === 'accept') {
-      [result] = await db.query(
-        `UPDATE folders SET status = 'archivada', archived_at = NOW()
-         WHERE id = ? AND status = 'archivacion_solicitada'`,
-        [folderId]
-      );
-    } else {
-      [result] = await db.query(
-        `UPDATE folders SET status = 'activa', archive_requested_by = NULL, archive_requested_at = NULL
-         WHERE id = ? AND status = 'archivacion_solicitada'`,
-        [folderId]
-      );
-    }
+    // accept -> estado final; reject / cancel -> se vuelve al estado anterior a la solicitud
+    const target = action === 'accept' ? flow.accepted : flow.reverted;
+    const [result] = await db.query(
+      `UPDATE folders
+       SET status = ?, archive_requested_by = NULL, archive_requested_at = NULL,
+           archived_at = CASE WHEN ? = 'archivada' AND archived_at IS NULL THEN NOW()
+                              WHEN ? = 'activa' THEN NULL ELSE archived_at END
+       WHERE id = ? AND status = ?`,
+      [target, target, target, folderId, flow.pending]
+    );
     if (result.affectedRows === 0) return json({ error: 'La carpeta ha cambiado, recarga' }, 409);
     return json({ ok: true });
   } finally {
@@ -534,19 +531,35 @@ async function handleFolderArchiveResponse(folderId, request, env, session) {
   }
 }
 
-// Restaurar es reversible y no destruye nada: cualquiera de las dos partes puede hacerlo.
-async function handleFolderRestore(folderId, env, session) {
+const handleFolderArchiveResponse = (folderId, request, env, session) =>
+  resolveFolderRequest(folderId, request, env, session, {
+    pending: 'archivacion_solicitada',
+    accepted: 'archivada',
+    reverted: 'activa',
+    notPending: 'Esta carpeta no tiene un archivado pendiente',
+  });
+
+const handleFolderRestoreResponse = (folderId, request, env, session) =>
+  resolveFolderRequest(folderId, request, env, session, {
+    pending: 'restauracion_solicitada',
+    accepted: 'activa',
+    reverted: 'archivada',
+    notPending: 'Esta carpeta no tiene una restauración pendiente',
+  });
+
+// Restaurar también necesita doble verificación: una parte solicita, la otra confirma.
+async function handleFolderRestoreRequest(folderId, env, session) {
   const db = await getDbConnection(env);
   try {
     const { folder, error } = await loadAccessibleFolder(db, folderId, session);
     if (error) return error;
     if (folder.status !== 'archivada') {
-      return json({ error: 'Esta carpeta no está archivada' }, 409);
+      return json({ error: 'Esta carpeta no está archivada o ya tiene una solicitud pendiente' }, 409);
     }
     const [result] = await db.query(
-      `UPDATE folders SET status = 'activa', archive_requested_by = NULL, archive_requested_at = NULL, archived_at = NULL
+      `UPDATE folders SET status = 'restauracion_solicitada', archive_requested_by = ?, archive_requested_at = NOW()
        WHERE id = ? AND status = 'archivada'`,
-      [folderId]
+      [session.userId, folderId]
     );
     if (result.affectedRows === 0) return json({ error: 'La carpeta ha cambiado, recarga' }, 409);
     return json({ ok: true });
@@ -693,9 +706,14 @@ export default {
         return await handleFolderArchiveResponse(folderArchiveResponseMatch[1], request, env, session);
       }
 
-      const folderRestoreMatch = path.match(/^\/api\/folders\/(\d+)\/restore$/);
-      if (folderRestoreMatch && request.method === 'POST') {
-        return await handleFolderRestore(folderRestoreMatch[1], env, session);
+      const folderRestoreRequestMatch = path.match(/^\/api\/folders\/(\d+)\/restore-request$/);
+      if (folderRestoreRequestMatch && request.method === 'POST') {
+        return await handleFolderRestoreRequest(folderRestoreRequestMatch[1], env, session);
+      }
+
+      const folderRestoreResponseMatch = path.match(/^\/api\/folders\/(\d+)\/restore-response$/);
+      if (folderRestoreResponseMatch && request.method === 'POST') {
+        return await handleFolderRestoreResponse(folderRestoreResponseMatch[1], request, env, session);
       }
 
       if (path === '/api/clients' && request.method === 'GET') {
