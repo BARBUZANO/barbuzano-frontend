@@ -557,6 +557,27 @@ html.app, body.app {
 
 .file-history li strong { color: var(--fg); font-weight: 500; }
 
+.file-history li.role-admin { --role-color: #8CC79A; }
+.file-history li.role-cliente { --role-color: #86AFD4; }
+
+.history-date { display: block; }
+
+/* Comentarios: texto en blanco sobre un bloque propio, con el color del rol */
+.file-history li.has-comment { border-left-color: var(--role-color); }
+.file-history li.has-comment strong { color: var(--role-color); }
+
+.history-comment {
+  margin-top: 0.45rem;
+  padding: 0.6rem 0.8rem;
+  background: rgba(245, 245, 240, 0.07);
+  border-radius: 8px;
+  color: var(--fg);
+  font-size: 0.88rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .file-comment textarea {
   font: inherit;
   color: var(--fg);
@@ -636,6 +657,41 @@ html.app, body.app {
 }
 
 .file-delete-msg:empty { display: none; }
+
+/* ---------- Eliminar carpeta ---------- */
+
+.folder-pending {
+  min-width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #E2B96A;
+  flex-shrink: 0;
+}
+
+.folder-delete {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.8rem 1.2rem;
+  flex-wrap: wrap;
+  margin: -0.6rem 0 1.2rem;
+}
+
+.folder-delete[hidden] { display: none; }
+
+.folder-delete-msg {
+  flex: 1;
+  min-width: 14rem;
+  font-size: 0.82rem;
+  color: var(--fg-dim);
+  line-height: 1.4;
+}
+
+.folder-delete-msg:empty { display: none; }
+
+.folder-delete-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+
+.folder-delete .pill-btn { padding: 0.45rem 1rem; font-size: 0.8rem; }
 
 /* ---------- Small screens ---------- */
 
