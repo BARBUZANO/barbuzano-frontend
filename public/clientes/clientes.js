@@ -50,6 +50,9 @@
   const folderListEl = $('#folder-list');
   const newFolderBtn = $('#new-folder-btn');
   const folderTitleEl = $('#folder-title');
+  const folderDeleteEl = $('#folder-delete');
+  const folderDeleteMsgEl = $('#folder-delete-msg');
+  const folderDeleteActionsEl = $('#folder-delete-actions');
   const contextEyebrowEl = $('#context-eyebrow');
   const fileListEl = $('#file-list');
   const emptyStateEl = $('#empty-state');
@@ -97,6 +100,9 @@
 
   // ¿Soy el destinatario de este archivo? (depende del archivo, no de la pestaña)
   const isRecipient = (file) => file.direction === RECEIVED_BY_ME();
+
+  const activeFolder = () =>
+    state.folderId == null ? null : (state.folders.find((f) => f.id === state.folderId) || null);
 
   const currentClient = () =>
     state.clients.find((c) => String(c.id) === String(state.clientId));
@@ -267,6 +273,7 @@
         <li>
           <button type="button" data-folder="${key}" class="${key === activeKey ? 'is-active' : ''}">
             <span>${esc(f.name)}</span>
+            ${f.status === 'eliminacion_solicitada' ? '<span class="folder-pending" title="Eliminación solicitada"></span>' : ''}
           </button>
         </li>
       `;
@@ -281,6 +288,38 @@
       ? (currentClient()?.username || 'Sin clientes')
       : 'Carpeta';
 
+    renderFolderDelete();
+  }
+
+  // Bloque de eliminación de la carpeta activa (la raíz "General" no se puede eliminar).
+  function renderFolderDelete() {
+    const folder = activeFolder();
+    if (!folder || state.tab === 'eliminados') {
+      folderDeleteEl.hidden = true;
+      return;
+    }
+
+    const myRole = isAdmin() ? 'admin' : 'cliente';
+    let msg = '';
+    let buttons = '';
+
+    if (folder.status === 'eliminacion_solicitada') {
+      if (folder.delete_requested_by_role === myRole) {
+        msg = 'Has solicitado eliminar esta carpeta. Falta que la otra parte lo confirme.';
+        buttons = '<button type="button" class="pill-btn outline-btn" data-folder-delete="cancel">Cancelar solicitud</button>';
+      } else {
+        msg = 'La otra parte ha solicitado eliminar esta carpeta.';
+        buttons = `
+          <button type="button" class="pill-btn outline-btn" data-folder-delete="reject">Mantener carpeta</button>
+          <button type="button" class="pill-btn ghost-btn" data-folder-delete="accept">Aceptar eliminación</button>`;
+      }
+    } else {
+      buttons = '<button type="button" class="pill-btn ghost-btn" data-folder-delete="request">Solicitar eliminación de la carpeta</button>';
+    }
+
+    folderDeleteMsgEl.textContent = msg;
+    folderDeleteActionsEl.innerHTML = buttons;
+    folderDeleteEl.hidden = false;
   }
 
   // ---------- Render: archivos ----------
@@ -302,7 +341,8 @@
   }
 
   function renderFiles() {
-    dropzoneEl.style.display = state.tab !== 'eliminados' && !(isAdmin() && state.clientId == null)
+    const folderLocked = activeFolder()?.status === 'eliminacion_solicitada';
+    dropzoneEl.style.display = state.tab !== 'eliminados' && !folderLocked && !(isAdmin() && state.clientId == null)
       ? 'flex' : 'none';
 
     emptyStateEl.textContent = isAdmin() && state.clientId == null
@@ -373,6 +413,35 @@
       await refresh();
     } catch (e) {
       showError(e.message);
+    }
+  });
+
+  // ---------- Interacción: eliminar carpeta (doble verificación) ----------
+  folderDeleteActionsEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-folder-delete]');
+    const folder = activeFolder();
+    if (!btn || !folder) return;
+    const action = btn.dataset.folderDelete;
+
+    const confirmations = {
+      request: `¿Solicitar la eliminación de la carpeta «${folder.name}»? La otra parte tendrá que confirmarla.`,
+      accept: `¿Aceptar la eliminación de la carpeta «${folder.name}»? Dejará de aparecer en tu lista.`,
+    };
+    if (confirmations[action] && !confirm(confirmations[action])) return;
+
+    const [path, body] = action === 'request'
+      ? [`/folders/${folder.id}/delete-request`, {}]
+      : [`/folders/${folder.id}/delete-response`, { action }];
+
+    try {
+      await apiJson(path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      await refresh(); // si se aceptó, la carpeta desaparece y se vuelve a "General"
+    } catch (err) {
+      showError(err.message);
     }
   });
 
@@ -526,11 +595,12 @@
       created_at: file.created_at,
     }];
 
+    // Los comentarios se pintan en su propio bloque, con el color del rol de quien los escribe.
     historyListEl.innerHTML = list.map((ev) => `
-      <li>
-        <strong>${esc(eventLabel(ev))}</strong><br>${esc(formatDate(ev.created_at))}${
-          ev.comment ? ` — “${esc(ev.comment)}”` : ''
-        }
+      <li class="role-${ev.role === 'admin' ? 'admin' : 'cliente'}${ev.comment ? ' has-comment' : ''}">
+        <strong>${esc(eventLabel(ev))}</strong>
+        <span class="history-date">${esc(formatDate(ev.created_at))}</span>
+        ${ev.comment ? `<p class="history-comment">${esc(ev.comment)}</p>` : ''}
       </li>
     `).join('');
 
