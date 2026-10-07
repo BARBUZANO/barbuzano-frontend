@@ -50,9 +50,12 @@
   const folderListEl = $('#folder-list');
   const newFolderBtn = $('#new-folder-btn');
   const folderTitleEl = $('#folder-title');
-  const folderDeleteEl = $('#folder-delete');
-  const folderDeleteMsgEl = $('#folder-delete-msg');
-  const folderDeleteActionsEl = $('#folder-delete-actions');
+  const folderActionEl = $('#folder-action');
+  const folderActionMsgEl = $('#folder-action-msg');
+  const folderActionActionsEl = $('#folder-action-actions');
+  const folderArchiveEl = $('#folder-archive');
+  const folderArchiveListEl = $('#folder-archive-list');
+  const folderArchiveCountEl = $('#folder-archive-count');
   const contextEyebrowEl = $('#context-eyebrow');
   const fileListEl = $('#file-list');
   const emptyStateEl = $('#empty-state');
@@ -264,22 +267,30 @@
 
   // ---------- Render: carpetas ----------
   function renderFolders() {
-    const items = [{ id: null, name: 'General' }, ...state.folders];
     const activeKey = state.folderId == null ? 'root' : String(state.folderId);
+    const current = state.folders.filter((f) => f.status !== 'archivada');
+    const archived = state.folders.filter((f) => f.status === 'archivada');
 
-    folderListEl.innerHTML = items.map((f) => {
+    const folderItem = (f) => {
       const key = f.id == null ? 'root' : String(f.id);
       return `
         <li>
           <button type="button" data-folder="${key}" class="${key === activeKey ? 'is-active' : ''}">
             <span>${esc(f.name)}</span>
-            ${f.status === 'eliminacion_solicitada' ? '<span class="folder-pending" title="Eliminación solicitada"></span>' : ''}
+            ${f.status === 'archivacion_solicitada' ? '<span class="folder-pending" title="Archivado solicitado"></span>' : ''}
           </button>
         </li>
       `;
-    }).join('');
+    };
 
-    const active = items.find((f) => (f.id == null ? 'root' : String(f.id)) === activeKey);
+    folderListEl.innerHTML = [{ id: null, name: 'General' }, ...current].map(folderItem).join('');
+    folderArchiveListEl.innerHTML = archived.map(folderItem).join('');
+    folderArchiveEl.hidden = archived.length === 0;
+    folderArchiveCountEl.textContent = archived.length ? `(${archived.length})` : '';
+    // Si la carpeta abierta está archivada, se despliega la sección para que se vea dónde está.
+    if (activeFolder()?.status === 'archivada') folderArchiveEl.open = true;
+
+    const active = state.folderId == null ? { name: 'General' } : activeFolder();
     folderTitleEl.textContent = state.tab === 'eliminados'
       ? 'Archivos eliminados'
       : (active ? active.name : '—');
@@ -288,14 +299,14 @@
       ? (currentClient()?.username || 'Sin clientes')
       : 'Carpeta';
 
-    renderFolderDelete();
+    renderFolderAction();
   }
 
-  // Bloque de eliminación de la carpeta activa (la raíz "General" no se puede eliminar).
-  function renderFolderDelete() {
+  // Barra de la carpeta activa: archivar / restaurar (la raíz "General" no se puede archivar).
+  function renderFolderAction() {
     const folder = activeFolder();
     if (!folder || state.tab === 'eliminados') {
-      folderDeleteEl.hidden = true;
+      folderActionEl.hidden = true;
       return;
     }
 
@@ -303,23 +314,27 @@
     let msg = '';
     let buttons = '';
 
-    if (folder.status === 'eliminacion_solicitada') {
-      if (folder.delete_requested_by_role === myRole) {
-        msg = 'Has solicitado eliminar esta carpeta. Falta que la otra parte lo confirme.';
-        buttons = '<button type="button" class="pill-btn outline-btn" data-folder-delete="cancel">Cancelar solicitud</button>';
+    if (folder.status === 'archivada') {
+      msg = 'Carpeta archivada: conserva todos sus documentos, en modo solo lectura.';
+      buttons = '<button type="button" class="pill-btn ghost-btn" data-folder-action="restore">Restaurar carpeta</button>';
+    } else if (folder.status === 'archivacion_solicitada') {
+      if (folder.archive_requested_by_role === myRole) {
+        msg = 'Has solicitado archivar esta carpeta. Falta que la otra parte lo confirme.';
+        buttons = '<button type="button" class="pill-btn outline-btn" data-folder-action="cancel">Cancelar solicitud</button>';
       } else {
-        msg = 'La otra parte ha solicitado eliminar esta carpeta.';
+        msg = 'La otra parte ha solicitado archivar esta carpeta. No se elimina ningún documento.';
         buttons = `
-          <button type="button" class="pill-btn outline-btn" data-folder-delete="reject">Mantener carpeta</button>
-          <button type="button" class="pill-btn ghost-btn" data-folder-delete="accept">Aceptar eliminación</button>`;
+          <button type="button" class="pill-btn outline-btn" data-folder-action="reject">Mantener activa</button>
+          <button type="button" class="pill-btn ghost-btn" data-folder-action="accept">Aceptar archivado</button>`;
       }
     } else {
-      buttons = '<button type="button" class="pill-btn ghost-btn" data-folder-delete="request">Solicitar eliminación de la carpeta</button>';
+      msg = 'Archivar conserva la carpeta y todos sus documentos; solo dejan de estar en la lista principal.';
+      buttons = '<button type="button" class="pill-btn ghost-btn" data-folder-action="request">Archivar carpeta</button>';
     }
 
-    folderDeleteMsgEl.textContent = msg;
-    folderDeleteActionsEl.innerHTML = buttons;
-    folderDeleteEl.hidden = false;
+    folderActionMsgEl.textContent = msg;
+    folderActionActionsEl.innerHTML = buttons;
+    folderActionEl.hidden = false;
   }
 
   // ---------- Render: archivos ----------
@@ -341,7 +356,7 @@
   }
 
   function renderFiles() {
-    const folderLocked = activeFolder()?.status === 'eliminacion_solicitada';
+    const folderLocked = !!activeFolder() && activeFolder().status !== 'activa';
     dropzoneEl.style.display = state.tab !== 'eliminados' && !folderLocked && !(isAdmin() && state.clientId == null)
       ? 'flex' : 'none';
 
@@ -378,13 +393,15 @@
   });
 
   // ---------- Interacción: carpeta ----------
-  folderListEl.addEventListener('click', (e) => {
+  function onFolderClick(e) {
     const btn = e.target.closest('button[data-folder]');
     if (!btn) return;
     state.folderId = btn.dataset.folder === 'root' ? null : Number(btn.dataset.folder);
     renderFolders();
     reloadFiles();
-  });
+  }
+  folderListEl.addEventListener('click', onFolderClick);
+  folderArchiveListEl.addEventListener('click', onFolderClick);
 
   // ---------- Interacción: pestañas ----------
   tabsEl.addEventListener('click', (e) => {
@@ -416,22 +433,24 @@
     }
   });
 
-  // ---------- Interacción: eliminar carpeta (doble verificación) ----------
-  folderDeleteActionsEl.addEventListener('click', async (e) => {
-    const btn = e.target.closest('button[data-folder-delete]');
+  // ---------- Interacción: archivar / restaurar carpeta ----------
+  folderActionActionsEl.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-folder-action]');
     const folder = activeFolder();
     if (!btn || !folder) return;
-    const action = btn.dataset.folderDelete;
+    const action = btn.dataset.folderAction;
 
     const confirmations = {
-      request: `¿Solicitar la eliminación de la carpeta «${folder.name}»? La otra parte tendrá que confirmarla.`,
-      accept: `¿Aceptar la eliminación de la carpeta «${folder.name}»? Dejará de aparecer en tu lista.`,
+      request: `¿Solicitar el archivado de la carpeta «${folder.name}»? La otra parte tendrá que confirmarlo. No se elimina ningún documento.`,
+      accept: `¿Aceptar el archivado de la carpeta «${folder.name}»? Pasará a "Archivadas" con todos sus documentos.`,
+      restore: `¿Restaurar la carpeta «${folder.name}»? Volverá a la lista principal y se podrá modificar de nuevo.`,
     };
     if (confirmations[action] && !confirm(confirmations[action])) return;
 
-    const [path, body] = action === 'request'
-      ? [`/folders/${folder.id}/delete-request`, {}]
-      : [`/folders/${folder.id}/delete-response`, { action }];
+    let path, body = {};
+    if (action === 'request') path = `/folders/${folder.id}/archive-request`;
+    else if (action === 'restore') path = `/folders/${folder.id}/restore`;
+    else { path = `/folders/${folder.id}/archive-response`; body = { action }; }
 
     try {
       await apiJson(path, {
@@ -439,7 +458,7 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
-      await refresh(); // si se aceptó, la carpeta desaparece y se vuelve a "General"
+      await refresh();
     } catch (err) {
       showError(err.message);
     }
@@ -532,16 +551,23 @@
 
     const pending = file.status === 'eliminacion_solicitada';
     const deleted = file.status === 'eliminado';
+    const readOnly = isInArchivedFolder(file);
 
     // Comentar pueden ambos; aceptar/rechazar solo el destinatario y si no hay eliminación en curso.
-    commentBlock.style.display = deleted ? 'none' : 'block';
-    resolveActionsEl.style.display = isRecipient(file) && !pending && !deleted ? 'flex' : 'none';
+    // En una carpeta archivada todo es de solo lectura.
+    commentBlock.style.display = deleted || readOnly ? 'none' : 'block';
+    resolveActionsEl.style.display = isRecipient(file) && !pending && !deleted && !readOnly ? 'flex' : 'none';
     commentInput.value = '';
     commentInput.placeholder = isAdmin()
       ? 'Escribe un comentario para el cliente…'
       : 'Escribe un comentario para la asesoría…';
 
     renderDeleteBlock(file);
+  }
+
+  function isInArchivedFolder(file) {
+    return file.folder_id != null
+      && state.folders.find((f) => f.id === file.folder_id)?.status === 'archivada';
   }
 
   function renderDeleteBlock(file) {
@@ -561,6 +587,8 @@
           <button type="button" class="pill-btn outline-btn" data-delete="reject">Mantener archivo</button>
           <button type="button" class="pill-btn ghost-btn" data-delete="accept">Aceptar eliminación</button>`;
       }
+    } else if (isInArchivedFolder(file)) {
+      msg = 'Esta carpeta está archivada: sus archivos son de solo lectura. Restáurala para modificarlos.';
     } else {
       buttons = '<button type="button" class="pill-btn ghost-btn" data-delete="request">Solicitar eliminación</button>';
     }
