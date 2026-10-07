@@ -110,7 +110,7 @@ async function handleUpload(request, env, session) {
     if (!clientId) return json({ error: 'Falta client_id' }, 400);
 
     if (folderId && !(await folderBelongsToClient(db, folderId, clientId))) {
-      return json({ error: 'La carpeta indicada no existe o no está disponible' }, 403);
+      return json({ error: 'La carpeta indicada no existe o está archivada' }, 403);
     }
 
     const uuid = crypto.randomUUID();
@@ -224,6 +224,8 @@ async function handleStatusUpdate(fileId, request, env, session) {
     if (DELETE_STATES.includes(file.status)) {
       return json({ error: 'El archivo está pendiente de eliminación o eliminado' }, 409);
     }
+    const lockedStatus = await archivedFolderError(db, file);
+    if (lockedStatus) return lockedStatus;
     // Solo quien recibe el archivo puede aceptarlo o rechazarlo.
     if (!isRecipient(file, session)) {
       return json({ error: 'Solo el destinatario puede resolver este archivo' }, 403);
@@ -286,6 +288,8 @@ async function handleComment(fileId, request, env, session) {
     const { file, error } = await loadAccessibleFile(db, fileId, session);
     if (error) return error;
     if (file.status === 'eliminado') return json({ error: 'El archivo está eliminado' }, 409);
+    const lockedComment = await archivedFolderError(db, file);
+    if (lockedComment) return lockedComment;
 
     await db.query(
       `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, 'comentario', ?)`,
@@ -309,6 +313,8 @@ async function handleDeleteRequest(fileId, request, env, session) {
     if (DELETE_STATES.includes(file.status)) {
       return json({ error: 'La eliminación de este archivo ya está solicitada o hecha' }, 409);
     }
+    const lockedDelete = await archivedFolderError(db, file);
+    if (lockedDelete) return lockedDelete;
 
     const [result] = await db.query(
       `UPDATE files SET status_before_delete = ?, status = 'eliminacion_solicitada', delete_requested_by = ?
@@ -392,7 +398,7 @@ async function handleFolderCreate(request, env, session) {
   const db = await getDbConnection(env);
   try {
     if (parent_id && !(await folderBelongsToClient(db, parent_id, clientId))) {
-      return json({ error: 'La carpeta padre no existe o no está disponible' }, 403);
+      return json({ error: 'La carpeta padre no existe o está archivada' }, 403);
     }
 
     const [result] = await db.query(
@@ -414,9 +420,9 @@ async function handleFolderList(url, env, session) {
     // Admin sin client_id: carpetas de todos los clientes.
     if (session.role === 'admin' && !clientIdParam) {
       const [rows] = await db.query(
-        `SELECT folders.*, users.username AS client_username, ru.role AS delete_requested_by_role
+        `SELECT folders.*, users.username AS client_username, ru.role AS archive_requested_by_role
          FROM folders JOIN users ON users.id = folders.client_id
-         LEFT JOIN users ru ON ru.id = folders.delete_requested_by
+         LEFT JOIN users ru ON ru.id = folders.archive_requested_by
          WHERE folders.status <> 'eliminada'
          ORDER BY users.username, folders.name`
       );
@@ -426,8 +432,8 @@ async function handleFolderList(url, env, session) {
     // Cliente: solo las suyas. Admin con client_id: las de ese cliente.
     const clientId = session.role === 'admin' ? clientIdParam : session.userId;
     const [rows] = await db.query(
-      `SELECT folders.*, ru.role AS delete_requested_by_role
-       FROM folders LEFT JOIN users ru ON ru.id = folders.delete_requested_by
+      `SELECT folders.*, ru.role AS archive_requested_by_role
+       FROM folders LEFT JOIN users ru ON ru.id = folders.archive_requested_by
        WHERE folders.client_id = ? AND folders.status <> 'eliminada'
        ORDER BY folders.name`,
       [clientId]
@@ -438,7 +444,8 @@ async function handleFolderList(url, env, session) {
   }
 }
 
-// ---------- Eliminación de carpetas (doble verificación, igual que los archivos) ----------
+// ---------- Archivado de carpetas (doble verificación) ----------
+// Archivar NO elimina nada: la carpeta y todos sus archivos se conservan, en solo lectura.
 
 // Carga la carpeta y comprueba que la sesión tiene acceso (admin, o el cliente dueño).
 async function loadAccessibleFolder(db, folderId, session) {
@@ -451,34 +458,27 @@ async function loadAccessibleFolder(db, folderId, session) {
   return { folder };
 }
 
-// Una carpeta solo se puede eliminar si no contiene archivos ni subcarpetas activos.
-async function folderIsEmpty(db, folderId) {
-  const [files] = await db.query(
-    "SELECT COUNT(*) AS n FROM files WHERE folder_id = ? AND status <> 'eliminado'",
-    [folderId]
-  );
-  const [subs] = await db.query(
-    "SELECT COUNT(*) AS n FROM folders WHERE parent_id = ? AND status <> 'eliminada'",
-    [folderId]
-  );
-  return Number(files[0].n) === 0 && Number(subs[0].n) === 0;
+// Los archivos de una carpeta archivada son de solo lectura hasta que se restaure.
+async function archivedFolderError(db, file) {
+  if (!file.folder_id) return null;
+  const [rows] = await db.query('SELECT status FROM folders WHERE id = ?', [file.folder_id]);
+  return rows[0]?.status === 'archivada'
+    ? json({ error: 'La carpeta está archivada. Restáurala para modificar sus archivos.' }, 409)
+    : null;
 }
 
-const FOLDER_NOT_EMPTY = 'La carpeta debe estar vacía: elimina antes los archivos que contiene.';
-
-// Cualquiera de las dos partes puede pedir la eliminación; la otra debe confirmarla.
-async function handleFolderDeleteRequest(folderId, env, session) {
+// Cualquiera de las dos partes puede pedir el archivado; la otra debe confirmarlo.
+async function handleFolderArchiveRequest(folderId, env, session) {
   const db = await getDbConnection(env);
   try {
     const { folder, error } = await loadAccessibleFolder(db, folderId, session);
     if (error) return error;
     if (folder.status !== 'activa') {
-      return json({ error: 'La eliminación de esta carpeta ya está solicitada' }, 409);
+      return json({ error: 'Esta carpeta ya está archivada o tiene el archivado solicitado' }, 409);
     }
-    if (!(await folderIsEmpty(db, folderId))) return json({ error: FOLDER_NOT_EMPTY }, 409);
 
     const [result] = await db.query(
-      `UPDATE folders SET status = 'eliminacion_solicitada', delete_requested_by = ?, delete_requested_at = NOW()
+      `UPDATE folders SET status = 'archivacion_solicitada', archive_requested_by = ?, archive_requested_at = NOW()
        WHERE id = ? AND status = 'activa'`,
       [session.userId, folderId]
     );
@@ -489,8 +489,8 @@ async function handleFolderDeleteRequest(folderId, env, session) {
   }
 }
 
-// accept / reject: solo la parte contraria a quien la pidió. cancel: solo quien la pidió.
-async function handleFolderDeleteResponse(folderId, request, env, session) {
+// accept / reject: solo la parte contraria a quien lo pidió. cancel: solo quien lo pidió.
+async function handleFolderArchiveResponse(folderId, request, env, session) {
   const { action } = await request.json();
   if (!['accept', 'reject', 'cancel'].includes(action)) return json({ error: 'Acción inválida' }, 400);
 
@@ -498,37 +498,56 @@ async function handleFolderDeleteResponse(folderId, request, env, session) {
   try {
     const { folder, error } = await loadAccessibleFolder(db, folderId, session);
     if (error) return error;
-    if (folder.status !== 'eliminacion_solicitada') {
-      return json({ error: 'Esta carpeta no tiene una eliminación pendiente' }, 409);
+    if (folder.status !== 'archivacion_solicitada') {
+      return json({ error: 'Esta carpeta no tiene un archivado pendiente' }, 409);
     }
 
-    const [users] = await db.query('SELECT role FROM users WHERE id = ?', [folder.delete_requested_by]);
+    const [users] = await db.query('SELECT role FROM users WHERE id = ?', [folder.archive_requested_by]);
     const requesterIsAdmin = users[0]?.role === 'admin';
     const sameSide = requesterIsAdmin === (session.role === 'admin');
 
     if (action === 'cancel' && !sameSide) {
-      return json({ error: 'Solo quien pidió la eliminación puede cancelarla' }, 403);
+      return json({ error: 'Solo quien pidió el archivado puede cancelarlo' }, 403);
     }
     if (action !== 'cancel' && sameSide) {
-      return json({ error: 'La eliminación debe confirmarla la otra parte' }, 403);
+      return json({ error: 'El archivado debe confirmarlo la otra parte' }, 403);
     }
 
     let result;
     if (action === 'accept') {
-      // Se vuelve a comprobar: pudo subirse algo mientras la solicitud estaba pendiente.
-      if (!(await folderIsEmpty(db, folderId))) return json({ error: FOLDER_NOT_EMPTY }, 409);
       [result] = await db.query(
-        `UPDATE folders SET status = 'eliminada', deleted_at = NOW()
-         WHERE id = ? AND status = 'eliminacion_solicitada'`,
+        `UPDATE folders SET status = 'archivada', archived_at = NOW()
+         WHERE id = ? AND status = 'archivacion_solicitada'`,
         [folderId]
       );
     } else {
       [result] = await db.query(
-        `UPDATE folders SET status = 'activa', delete_requested_by = NULL, delete_requested_at = NULL
-         WHERE id = ? AND status = 'eliminacion_solicitada'`,
+        `UPDATE folders SET status = 'activa', archive_requested_by = NULL, archive_requested_at = NULL
+         WHERE id = ? AND status = 'archivacion_solicitada'`,
         [folderId]
       );
     }
+    if (result.affectedRows === 0) return json({ error: 'La carpeta ha cambiado, recarga' }, 409);
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+// Restaurar es reversible y no destruye nada: cualquiera de las dos partes puede hacerlo.
+async function handleFolderRestore(folderId, env, session) {
+  const db = await getDbConnection(env);
+  try {
+    const { folder, error } = await loadAccessibleFolder(db, folderId, session);
+    if (error) return error;
+    if (folder.status !== 'archivada') {
+      return json({ error: 'Esta carpeta no está archivada' }, 409);
+    }
+    const [result] = await db.query(
+      `UPDATE folders SET status = 'activa', archive_requested_by = NULL, archive_requested_at = NULL, archived_at = NULL
+       WHERE id = ? AND status = 'archivada'`,
+      [folderId]
+    );
     if (result.affectedRows === 0) return json({ error: 'La carpeta ha cambiado, recarga' }, 409);
     return json({ ok: true });
   } finally {
@@ -664,14 +683,19 @@ export default {
         return await handleFolderList(url, env, session);
       }
 
-      const folderDeleteRequestMatch = path.match(/^\/api\/folders\/(\d+)\/delete-request$/);
-      if (folderDeleteRequestMatch && request.method === 'POST') {
-        return await handleFolderDeleteRequest(folderDeleteRequestMatch[1], env, session);
+      const folderArchiveRequestMatch = path.match(/^\/api\/folders\/(\d+)\/archive-request$/);
+      if (folderArchiveRequestMatch && request.method === 'POST') {
+        return await handleFolderArchiveRequest(folderArchiveRequestMatch[1], env, session);
       }
 
-      const folderDeleteResponseMatch = path.match(/^\/api\/folders\/(\d+)\/delete-response$/);
-      if (folderDeleteResponseMatch && request.method === 'POST') {
-        return await handleFolderDeleteResponse(folderDeleteResponseMatch[1], request, env, session);
+      const folderArchiveResponseMatch = path.match(/^\/api\/folders\/(\d+)\/archive-response$/);
+      if (folderArchiveResponseMatch && request.method === 'POST') {
+        return await handleFolderArchiveResponse(folderArchiveResponseMatch[1], request, env, session);
+      }
+
+      const folderRestoreMatch = path.match(/^\/api\/folders\/(\d+)\/restore$/);
+      if (folderRestoreMatch && request.method === 'POST') {
+        return await handleFolderRestore(folderRestoreMatch[1], env, session);
       }
 
       if (path === '/api/clients' && request.method === 'GET') {
