@@ -86,6 +86,8 @@
   const deleteActionsEl = $('#file-delete-actions');
   const previewEl = $('#file-preview');
 
+  const mainLayoutEl = $('#main-layout');
+  const themeSwitchEl = $('#theme-switch');
   const taskCardEl = $('#tasks-card');
   const taskCountEl = $('#tasks-count');
   const taskAddBtn = $('#task-add-btn');
@@ -916,6 +918,8 @@
 
     // El cliente sin tareas abiertas no ve el cuadro; el asesor siempre, para poder crear.
     taskCardEl.hidden = !hasClient || (!admin && open.length === 0);
+    // Con tareas: archivos a la izquierda y tareas a la derecha; sin tareas: archivos centrados.
+    mainLayoutEl.classList.toggle('has-tasks', !taskCardEl.hidden);
     if (taskCardEl.hidden) return;
 
     const pending = open.filter((t) => t.status === 'pendiente').length;
@@ -1023,6 +1027,23 @@
   taskTitleInput.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') createTask();
   });
+
+  // ---------- Tema: modo oscuro / modo día ----------
+  // theme.js aplica el tema guardado al cargar; aquí solo se gestiona el interruptor.
+  function applyTheme(theme, persist) {
+    document.documentElement.dataset.theme = theme;
+    themeSwitchEl.setAttribute('aria-checked', String(theme === 'light'));
+    if (persist) {
+      try { localStorage.setItem('barbuzano-theme', theme); } catch (e) { /* da igual */ }
+    }
+  }
+
+  themeSwitchEl.addEventListener('click', () => {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    applyTheme(next, true);
+  });
+
+  applyTheme(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark', false);
 
   // ---------- Cerrar sesión ----------
   $('#logout-btn').addEventListener('click', async () => {
