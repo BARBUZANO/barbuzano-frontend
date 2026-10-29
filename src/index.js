@@ -3,6 +3,21 @@ import bcrypt from 'bcryptjs';
 
 const SESSION_MAX_AGE_SECONDS = 86400; // 24h
 
+// Límites de entrada
+const MAX_USERNAME_LENGTH = 100;
+const MAX_PASSWORD_LENGTH = 200;
+const MAX_COMMENT_LENGTH = 1000;
+const MAX_FOLDER_NAME_LENGTH = 100;
+const MAX_FILENAME_LENGTH = 200;
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024; // 25 MB
+
+// Tipos de archivo permitidos en las subidas. Amplía la lista si hace falta (xlsx, docx, csv...).
+const ALLOWED_UPLOAD_TYPES = ['application/pdf', 'image/jpeg', 'image/png'];
+
+// Hash bcrypt de una cadena aleatoria: se usa cuando el usuario no existe para que el
+// login tarde lo mismo y no revele qué usuarios son válidos.
+const DUMMY_HASH = '$2b$10$tVU2iKWfNZBd7BwUkkjtUONsKQS1/FfrEK2z6ktzW1t74.baCL8by';
+
 async function getDbConnection(env) {
   return await mysql.createConnection({
     host: env.HYPERDRIVE.host,
@@ -14,60 +29,132 @@ async function getDbConnection(env) {
   });
 }
 
-const corsHeaders = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+// La web y la API son el mismo Worker (mismo origen), así que no se necesita CORS.
+const baseHeaders = {
+  'Content-Type': 'application/json',
+  'Cache-Control': 'no-store',
+  'X-Content-Type-Options': 'nosniff',
 };
 
 function json(data, status = 200, extraHeaders = {}) {
   return new Response(JSON.stringify(data), {
     status,
-    headers: { ...corsHeaders, 'Content-Type': 'application/json', ...extraHeaders },
+    headers: { ...baseHeaders, ...extraHeaders },
   });
+}
+
+// ---------- Validación de entrada ----------
+// Con mysql2, un objeto o array en un parámetro "?" se expande a SQL (p. ej. {"id":1} -> `id` = 1).
+// Por eso todo valor que venga del cliente se fuerza a su tipo esperado antes de consultar.
+
+// Id entero positivo o null.
+function toId(value) {
+  if (typeof value !== 'string' && typeof value !== 'number') return null;
+  if (typeof value === 'string' && !/^\d{1,15}$/.test(value)) return null;
+  const n = Number(value);
+  return Number.isSafeInteger(n) && n > 0 ? n : null;
+}
+
+// Id opcional: undefined = inválido, null = no informado, número = válido.
+function toOptionalId(value) {
+  if (value === undefined || value === null || value === '') return null;
+  return toId(value) ?? undefined;
+}
+
+// Texto: '' si no viene, null si es inválido (no es string o supera el máximo).
+function readText(value, max) {
+  if (value === undefined || value === null) return '';
+  if (typeof value !== 'string') return null;
+  const text = value.trim();
+  return text.length > max ? null : text;
+}
+
+async function readJson(request) {
+  const body = await request.json().catch(() => null);
+  return body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+}
+
+// Nombre de archivo seguro para guardar y para cabeceras.
+function sanitizeFilename(name) {
+  const clean = String(name ?? 'archivo')
+    .replace(/[\x00-\x1f\x7f"\\/:*?<>|]/g, '_')
+    .trim();
+  const finalName = clean.length > MAX_FILENAME_LENGTH ? clean.slice(-MAX_FILENAME_LENGTH) : clean;
+  return finalName || 'archivo';
 }
 
 // ---------- Sesión (cookie firmada con HMAC, con caducidad) ----------
 
+function toBase64(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function fromBase64(b64) {
+  const bin = atob(b64);
+  return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+}
+
+function bytesToHex(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexToBytes(hex) {
+  if (!/^[0-9a-f]{64}$/.test(hex)) return null;
+  return Uint8Array.from(hex.match(/../g), (h) => parseInt(h, 16));
+}
+
+async function hmacKey(secret, usages) {
+  return await crypto.subtle.importKey(
+    'raw', new TextEncoder().encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, usages
+  );
+}
+
 async function signSession(payload, secret) {
   const data = JSON.stringify(payload);
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  );
-  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
-  const sigHex = [...new Uint8Array(signature)].map(b => b.toString(16).padStart(2, '0')).join('');
-  return `${btoa(data)}.${sigHex}`;
+  const key = await hmacKey(secret, ['sign']);
+  const signature = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(data));
+  return `${toBase64(data)}.${bytesToHex(new Uint8Array(signature))}`;
 }
 
 async function verifySession(cookieValue, secret) {
   if (!cookieValue) return null;
-  const [encodedPayload, sigHex] = cookieValue.split('.');
-  if (!encodedPayload || !sigHex) return null;
+  try {
+    const [encodedPayload, sigHex, extra] = cookieValue.split('.');
+    if (!encodedPayload || !sigHex || extra !== undefined) return null;
 
-  const data = atob(encodedPayload);
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey(
-    'raw', encoder.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-  );
-  const expectedSig = await crypto.subtle.sign('HMAC', key, encoder.encode(data));
-  const expectedHex = [...new Uint8Array(expectedSig)].map(b => b.toString(16).padStart(2, '0')).join('');
+    const sigBytes = hexToBytes(sigHex);
+    if (!sigBytes) return null;
 
-  if (expectedHex !== sigHex) return null;
+    const data = fromBase64(encodedPayload);
+    const key = await hmacKey(secret, ['verify']);
+    // crypto.subtle.verify compara en tiempo constante
+    const valid = await crypto.subtle.verify('HMAC', key, sigBytes, new TextEncoder().encode(data));
+    if (!valid) return null;
 
-  const payload = JSON.parse(data);
+    const payload = JSON.parse(data);
 
-  // La cookie del navegador caduca sola, pero si alguien reutiliza una
-  // cookie copiada, esto la invalida igualmente en el servidor.
-  if (!payload.exp || Date.now() > payload.exp) return null;
+    // La cookie del navegador caduca sola, pero si alguien reutiliza una
+    // cookie copiada, esto la invalida igualmente en el servidor.
+    if (!payload || typeof payload.exp !== 'number' || Date.now() > payload.exp) return null;
 
-  return payload;
+    return payload;
+  } catch {
+    // Cookie malformada: se trata como no autenticado, no como error interno.
+    return null;
+  }
 }
 
 function getCookie(request, name) {
   const cookieHeader = request.headers.get('Cookie') || '';
-  const match = cookieHeader.match(new RegExp(`${name}=([^;]+)`));
-  return match ? match[1] : null;
+  for (const part of cookieHeader.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx === -1) continue;
+    if (part.slice(0, idx).trim() === name) return part.slice(idx + 1).trim();
+  }
+  return null;
 }
 
 async function requireSession(request, env) {
@@ -75,13 +162,41 @@ async function requireSession(request, env) {
   return await verifySession(cookieValue, env.SESSION_SECRET);
 }
 
-// ---------- Utilidades de carpetas ----------
+// Comprueba en la base de datos que el usuario sigue existiendo y activo, y toma de ahí
+// su rol actual (así un cambio de rol o una desactivación surten efecto de inmediato).
+async function loadActiveSession(env, cookieSession) {
+  const userId = toId(cookieSession.userId);
+  if (!userId) return null;
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query(
+      'SELECT id, username, role, active FROM users WHERE id = ?',
+      [userId]
+    );
+    const user = rows[0];
+    if (!user || !user.active) return null;
+    return { userId: user.id, username: user.username, role: user.role };
+  } finally {
+    await db.end();
+  }
+}
+
+// ---------- Utilidades de carpetas y clientes ----------
 
 async function folderBelongsToClient(db, folderId, clientId) {
   if (!folderId) return true;
   const [rows] = await db.query(
     "SELECT id FROM folders WHERE id = ? AND client_id = ? AND status = 'activa'",
     [folderId, clientId]
+  );
+  return rows.length > 0;
+}
+
+async function clientExists(db, clientId) {
+  const [rows] = await db.query(
+    "SELECT id FROM users WHERE id = ? AND role = 'cliente' AND active = 1",
+    [clientId]
   );
   return rows.length > 0;
 }
@@ -98,23 +213,37 @@ const DELETE_STATES = ['eliminacion_solicitada', 'eliminado'];
 // ---------- Endpoints de archivos ----------
 
 async function handleUpload(request, env, session) {
+  const formData = await request.formData();
+  const file = formData.get('file');
+  if (!file || typeof file === 'string') return json({ error: 'Falta el archivo' }, 400);
+
+  if (file.size > MAX_UPLOAD_BYTES) {
+    return json({ error: 'El archivo supera el tamaño máximo (25 MB)' }, 413);
+  }
+  if (!ALLOWED_UPLOAD_TYPES.includes(file.type)) {
+    return json({ error: 'Tipo de archivo no permitido (solo PDF, JPG o PNG)' }, 415);
+  }
+
+  const folderId = toOptionalId(formData.get('folder_id'));
+  if (folderId === undefined) return json({ error: 'folder_id inválido' }, 400);
+
+  const isAdmin = session.role === 'admin';
+  const direction = isAdmin ? 'asesoria_a_cliente' : 'cliente_a_asesoria';
+  const clientId = toId(isAdmin ? formData.get('client_id') : session.userId);
+  if (!clientId) return json({ error: 'Falta client_id' }, 400);
+
   const db = await getDbConnection(env);
   try {
-    const formData = await request.formData();
-    const file = formData.get('file');
-    const folderId = formData.get('folder_id') || null;
-    if (!file) return json({ error: 'Falta el archivo' }, 400);
-
-    const direction = session.role === 'admin' ? 'asesoria_a_cliente' : 'cliente_a_asesoria';
-    const clientId = session.role === 'admin' ? formData.get('client_id') : session.userId;
-    if (!clientId) return json({ error: 'Falta client_id' }, 400);
-
+    if (isAdmin && !(await clientExists(db, clientId))) {
+      return json({ error: 'Cliente no encontrado' }, 404);
+    }
     if (folderId && !(await folderBelongsToClient(db, folderId, clientId))) {
       return json({ error: 'La carpeta indicada no existe o está archivada' }, 403);
     }
 
+    const safeName = sanitizeFilename(file.name);
     const uuid = crypto.randomUUID();
-    const key = `clientes/${clientId}/${uuid}-${file.name}`;
+    const key = `clientes/${clientId}/${uuid}-${safeName}`;
 
     await env.BARBUZANO_FILES.put(key, file.stream(), {
       httpMetadata: { contentType: file.type },
@@ -123,7 +252,7 @@ async function handleUpload(request, env, session) {
     const [result] = await db.query(
       `INSERT INTO files (client_id, folder_id, direction, uploaded_by, r2_key, original_filename, mime_type, size_bytes, status)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'nuevo')`,
-      [clientId, folderId, direction, session.userId, key, file.name, file.type, file.size]
+      [clientId, folderId, direction, session.userId, key, safeName, file.type, file.size]
     );
     await db.query(
       `INSERT INTO file_events (file_id, user_id, event_type) VALUES (?, ?, 'subida')`,
@@ -137,9 +266,18 @@ async function handleUpload(request, env, session) {
 }
 
 async function handleList(url, env, session) {
-  const direction = url.searchParams.get('direction'); // opcional: sin él, devuelve ambas
-  const folderId = url.searchParams.get('folder_id');
-  const clientIdParam = url.searchParams.get('client_id');
+  const directionParam = url.searchParams.get('direction'); // opcional: sin él, devuelve ambas
+  if (directionParam && !['cliente_a_asesoria', 'asesoria_a_cliente'].includes(directionParam)) {
+    return json({ error: 'direction inválido' }, 400);
+  }
+  const direction = directionParam || null;
+
+  const folderId = toOptionalId(url.searchParams.get('folder_id'));
+  if (folderId === undefined) return json({ error: 'folder_id inválido' }, 400);
+
+  const clientIdParam = toOptionalId(url.searchParams.get('client_id'));
+  if (clientIdParam === undefined) return json({ error: 'client_id inválido' }, 400);
+
   // Solo el admin puede ver los archivos eliminados (se conservan como histórico).
   const deleted = url.searchParams.get('deleted') === '1' && session.role === 'admin';
 
@@ -196,11 +334,15 @@ async function handleDownload(fileId, env, session) {
       );
     }
 
+    const safeName = sanitizeFilename(file.original_filename);
+    const asciiName = safeName.replace(/[^\x20-\x7e]/g, '_');
+
     return new Response(object.body, {
       headers: {
-        ...corsHeaders,
         'Content-Type': file.mime_type || 'application/octet-stream',
-        'Content-Disposition': `attachment; filename="${file.original_filename}"`,
+        'Content-Disposition': `attachment; filename="${asciiName}"; filename*=UTF-8''${encodeURIComponent(safeName)}`,
+        'X-Content-Type-Options': 'nosniff',
+        'Cache-Control': 'private, no-store',
       },
     });
   } finally {
@@ -209,9 +351,12 @@ async function handleDownload(fileId, env, session) {
 }
 
 async function handleStatusUpdate(fileId, request, env, session) {
-  const { status, comment } = await request.json();
+  const { status, comment } = await readJson(request);
   const validStatuses = ['aceptado', 'aceptado_con_observaciones', 'rechazado'];
   if (!validStatuses.includes(status)) return json({ error: 'Estado inválido' }, 400);
+
+  const note = readText(comment, MAX_COMMENT_LENGTH);
+  if (note === null) return json({ error: 'Comentario inválido o demasiado largo' }, 400);
 
   const db = await getDbConnection(env);
   try {
@@ -234,7 +379,7 @@ async function handleStatusUpdate(fileId, request, env, session) {
     await db.query(`UPDATE files SET status = ? WHERE id = ?`, [status, fileId]);
     await db.query(
       `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, ?, ?)`,
-      [fileId, session.userId, status, comment || null]
+      [fileId, session.userId, status, note || null]
     );
 
     return json({ ok: true });
@@ -278,10 +423,12 @@ async function loadAccessibleFile(db, fileId, session) {
 
 // Comentario suelto: lo pueden dejar el cliente y la asesoría sobre cualquier archivo suyo.
 async function handleComment(fileId, request, env, session) {
-  const { comment } = await request.json();
-  const text = (comment || '').trim();
+  const { comment } = await readJson(request);
+  const text = readText(comment, MAX_COMMENT_LENGTH);
+  if (text === null) {
+    return json({ error: `El comentario no es válido o supera los ${MAX_COMMENT_LENGTH} caracteres` }, 400);
+  }
   if (!text) return json({ error: 'El comentario está vacío' }, 400);
-  if (text.length > 1000) return json({ error: 'El comentario supera los 1000 caracteres' }, 400);
 
   const db = await getDbConnection(env);
   try {
@@ -303,8 +450,9 @@ async function handleComment(fileId, request, env, session) {
 
 // Cualquiera de las dos partes puede pedir la eliminación; la otra debe confirmarla.
 async function handleDeleteRequest(fileId, request, env, session) {
-  const body = await request.json().catch(() => ({}));
-  const comment = (body.comment || '').trim() || null;
+  const body = await readJson(request);
+  const comment = readText(body.comment, MAX_COMMENT_LENGTH);
+  if (comment === null) return json({ error: 'Comentario inválido o demasiado largo' }, 400);
 
   const db = await getDbConnection(env);
   try {
@@ -325,7 +473,7 @@ async function handleDeleteRequest(fileId, request, env, session) {
 
     await db.query(
       `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, 'eliminacion_solicitada', ?)`,
-      [fileId, session.userId, comment]
+      [fileId, session.userId, comment || null]
     );
     return json({ ok: true });
   } finally {
@@ -335,9 +483,10 @@ async function handleDeleteRequest(fileId, request, env, session) {
 
 // accept / reject: solo la parte contraria a quien la pidió. cancel: solo quien la pidió.
 async function handleDeleteResponse(fileId, request, env, session) {
-  const { action, comment } = await request.json();
+  const { action, comment } = await readJson(request);
   if (!['accept', 'reject', 'cancel'].includes(action)) return json({ error: 'Acción inválida' }, 400);
-  const note = (comment || '').trim() || null;
+  const note = readText(comment, MAX_COMMENT_LENGTH);
+  if (note === null) return json({ error: 'Comentario inválido o demasiado largo' }, 400);
 
   const db = await getDbConnection(env);
   try {
@@ -378,7 +527,7 @@ async function handleDeleteResponse(fileId, request, env, session) {
 
     await db.query(
       `INSERT INTO file_events (file_id, user_id, event_type, comment) VALUES (?, ?, ?, ?)`,
-      [fileId, session.userId, eventType, note]
+      [fileId, session.userId, eventType, note || null]
     );
     return json({ ok: true });
   } finally {
@@ -389,21 +538,37 @@ async function handleDeleteResponse(fileId, request, env, session) {
 // ---------- Endpoints de carpetas ----------
 
 async function handleFolderCreate(request, env, session) {
-  const { name, client_id, parent_id } = await request.json();
-  if (!name) return json({ error: 'Falta el nombre' }, 400);
+  const { name, client_id, parent_id } = await readJson(request);
 
-  const clientId = session.role === 'admin' && client_id ? client_id : session.userId;
-  const direction = session.role === 'admin' ? 'asesoria_a_cliente' : 'cliente_a_asesoria';
+  const folderName = readText(name, MAX_FOLDER_NAME_LENGTH);
+  if (folderName === null) {
+    return json({ error: `El nombre no es válido o supera los ${MAX_FOLDER_NAME_LENGTH} caracteres` }, 400);
+  }
+  if (!folderName) return json({ error: 'Falta el nombre' }, 400);
+
+  const parentId = toOptionalId(parent_id);
+  if (parentId === undefined) return json({ error: 'parent_id inválido' }, 400);
+
+  const isAdmin = session.role === 'admin';
+  let clientId = session.userId;
+  if (isAdmin && client_id !== undefined && client_id !== null && client_id !== '') {
+    clientId = toId(client_id);
+    if (!clientId) return json({ error: 'client_id inválido' }, 400);
+  }
+  const direction = isAdmin ? 'asesoria_a_cliente' : 'cliente_a_asesoria';
 
   const db = await getDbConnection(env);
   try {
-    if (parent_id && !(await folderBelongsToClient(db, parent_id, clientId))) {
+    if (isAdmin && clientId !== session.userId && !(await clientExists(db, clientId))) {
+      return json({ error: 'Cliente no encontrado' }, 404);
+    }
+    if (parentId && !(await folderBelongsToClient(db, parentId, clientId))) {
       return json({ error: 'La carpeta padre no existe o está archivada' }, 403);
     }
 
     const [result] = await db.query(
       `INSERT INTO folders (client_id, name, parent_id, direction) VALUES (?, ?, ?, ?)`,
-      [clientId, name, parent_id || null, direction]
+      [clientId, folderName, parentId, direction]
     );
 
     return json({ ok: true, folderId: result.insertId });
@@ -413,7 +578,8 @@ async function handleFolderCreate(request, env, session) {
 }
 
 async function handleFolderList(url, env, session) {
-  const clientIdParam = url.searchParams.get('client_id');
+  const clientIdParam = toOptionalId(url.searchParams.get('client_id'));
+  if (clientIdParam === undefined) return json({ error: 'client_id inválido' }, 400);
 
   const db = await getDbConnection(env);
   try {
@@ -492,7 +658,7 @@ async function handleFolderArchiveRequest(folderId, env, session) {
 // accept / reject: solo la parte contraria a quien lo pidió. cancel: solo quien lo pidió.
 // Sirve para el archivado y para la restauración; cambia solo el estado de partida y los de destino.
 async function resolveFolderRequest(folderId, request, env, session, flow) {
-  const { action } = await request.json();
+  const { action } = await readJson(request);
   if (!['accept', 'reject', 'cancel'].includes(action)) return json({ error: 'Acción inválida' }, 400);
 
   const db = await getDbConnection(env);
@@ -604,14 +770,14 @@ const TASK_TRANSITIONS = {
 };
 
 function isValidDateString(str) {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
+  if (typeof str !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(str)) return false;
   const d = new Date(`${str}T00:00:00Z`);
   return !isNaN(d) && d.toISOString().slice(0, 10) === str;
 }
 
 async function handleTaskList(url, env, session) {
   const admin = session.role === 'admin';
-  const clientId = admin ? url.searchParams.get('client_id') : session.userId;
+  const clientId = admin ? toId(url.searchParams.get('client_id')) : session.userId;
   if (!clientId) return json({ error: 'Falta client_id' }, 400);
 
   const db = await getDbConnection(env);
@@ -636,31 +802,29 @@ async function handleTaskList(url, env, session) {
 async function handleTaskCreate(request, env, session) {
   if (session.role !== 'admin') return json({ error: 'No autorizado' }, 403);
 
-  const body = await request.json().catch(() => ({}));
-  const clientId = body.client_id;
-  const title = String(body.title ?? '').trim();
-  const description = String(body.description ?? '').trim() || null;
-  const dueDate = body.due_date || null;
+  const body = await readJson(request);
+  const clientId = toId(body.client_id);
+  const title = readText(body.title, 200);
+  const description = readText(body.description, 2000);
+  const dueDate = body.due_date === undefined || body.due_date === null || body.due_date === ''
+    ? null
+    : body.due_date;
 
   if (!clientId) return json({ error: 'Falta client_id' }, 400);
+  if (title === null) return json({ error: 'El título no es válido o supera los 200 caracteres' }, 400);
   if (!title) return json({ error: 'La tarea necesita un título' }, 400);
-  if (title.length > 200) return json({ error: 'El título supera los 200 caracteres' }, 400);
-  if (description && description.length > 2000) {
-    return json({ error: 'La descripción supera los 2000 caracteres' }, 400);
+  if (description === null) {
+    return json({ error: 'La descripción no es válida o supera los 2000 caracteres' }, 400);
   }
   if (dueDate && !isValidDateString(dueDate)) return json({ error: 'Fecha límite inválida' }, 400);
 
   const db = await getDbConnection(env);
   try {
-    const [clients] = await db.query(
-      `SELECT id FROM users WHERE id = ? AND role = 'cliente' AND active = 1`,
-      [clientId]
-    );
-    if (clients.length === 0) return json({ error: 'Cliente no encontrado' }, 404);
+    if (!(await clientExists(db, clientId))) return json({ error: 'Cliente no encontrado' }, 404);
 
     const [result] = await db.query(
       `INSERT INTO tasks (client_id, title, description, due_date, created_by) VALUES (?, ?, ?, ?, ?)`,
-      [clientId, title, description, dueDate, session.userId]
+      [clientId, title, description || null, dueDate, session.userId]
     );
     return json({ ok: true, taskId: result.insertId });
   } finally {
@@ -669,7 +833,7 @@ async function handleTaskCreate(request, env, session) {
 }
 
 async function handleTaskStatus(taskId, request, env, session) {
-  const { status } = await request.json().catch(() => ({}));
+  const { status } = await readJson(request);
   if (!TASK_STATES.includes(status)) return json({ error: 'Estado inválido' }, 400);
 
   const admin = session.role === 'admin';
@@ -704,69 +868,96 @@ async function handleTaskStatus(taskId, request, env, session) {
   }
 }
 
+// ---------- Login ----------
+
+async function handleLogin(request, env) {
+  const { username, password } = await readJson(request);
+
+  // Solo strings: un objeto en "username" acabaría expandido dentro del SQL.
+  if (typeof username !== 'string' || typeof password !== 'string' || !username || !password) {
+    return json({ error: 'Faltan credenciales' }, 400);
+  }
+  if (username.length > MAX_USERNAME_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
+    return json({ error: 'Usuario o contraseña incorrectos' }, 401);
+  }
+
+  const db = await getDbConnection(env);
+  let user;
+  try {
+    const [rows] = await db.query(
+      'SELECT id, username, password_hash, active, role FROM users WHERE username = ?',
+      [username]
+    );
+    user = rows[0];
+  } finally {
+    await db.end();
+  }
+
+  // Se ejecuta bcrypt siempre (con un hash ficticio si no hay usuario) para que el
+  // tiempo de respuesta no delate si el usuario existe.
+  const hashToCheck = user?.password_hash || DUMMY_HASH;
+  const passwordMatches = await bcrypt.compare(password, hashToCheck);
+
+  if (!user || !user.active || !passwordMatches) {
+    return json({ error: 'Usuario o contraseña incorrectos' }, 401);
+  }
+
+  const sessionToken = await signSession(
+    {
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
+    },
+    env.SESSION_SECRET
+  );
+
+  return json(
+    { message: 'Autenticación exitosa', user: { id: user.id, username: user.username, role: user.role } },
+    200,
+    { 'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}` }
+  );
+}
+
 // ---------- Router ----------
+
+const CLEAR_SESSION_COOKIE = 'session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0';
 
 export default {
   async fetch(request, env) {
-    if (request.method === 'OPTIONS') {
-      return new Response(null, { headers: corsHeaders });
-    }
-
     const url = new URL(request.url);
     const path = url.pathname;
 
     try {
+      // Defensa extra contra CSRF: las peticiones que modifican datos deben venir de nuestro propio origen.
+      if (request.method !== 'GET' && request.method !== 'HEAD') {
+        const origin = request.headers.get('Origin');
+        if (origin) {
+          let originHost = null;
+          try { originHost = new URL(origin).host; } catch { /* origen inválido */ }
+          if (originHost !== url.host) return json({ error: 'Origen no permitido' }, 403);
+        }
+      }
+
       // --- Login (público) ---
       if (path === '/api/login' && request.method === 'POST') {
-        const { username, password } = await request.json();
-        if (!username || !password) return json({ error: 'Faltan credenciales' }, 400);
-
-        const db = await getDbConnection(env);
-        let user;
-        try {
-          const [rows] = await db.query(
-            'SELECT id, username, password_hash, active, role FROM users WHERE username = ?',
-            [username]
-          );
-          user = rows[0];
-        } finally {
-          await db.end();
-        }
-
-        if (!user || !user.active) return json({ error: 'Usuario o contraseña incorrectos' }, 401);
-
-        const passwordMatches = await bcrypt.compare(password, user.password_hash);
-        if (!passwordMatches) return json({ error: 'Usuario o contraseña incorrectos' }, 401);
-
-        const sessionToken = await signSession(
-          {
-            userId: user.id,
-            username: user.username,
-            role: user.role,
-            exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
-          },
-          env.SESSION_SECRET
-        );
-
-        return json(
-          { message: 'Autenticación exitosa', user: { id: user.id, username: user.username, role: user.role } },
-          200,
-          { 'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}` }
-        );
+        return await handleLogin(request, env);
       }
 
       // --- Logout (público) ---
       if (path === '/api/logout' && request.method === 'POST') {
-        return json(
-          { ok: true },
-          200,
-          { 'Set-Cookie': `session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0` }
-        );
+        return json({ ok: true }, 200, { 'Set-Cookie': CLEAR_SESSION_COOKIE });
       }
 
       // --- Todo lo demás requiere sesión ---
-      const session = await requireSession(request, env);
-      if (!session) return json({ error: 'No autenticado' }, 401);
+      const cookieSession = await requireSession(request, env);
+      if (!cookieSession) return json({ error: 'No autenticado' }, 401);
+
+      // La cookie es válida; se comprueba además que el usuario sigue activo y se toma su rol actual.
+      const session = await loadActiveSession(env, cookieSession);
+      if (!session) {
+        return json({ error: 'No autenticado' }, 401, { 'Set-Cookie': CLEAR_SESSION_COOKIE });
+      }
 
       if (path === '/api/me' && request.method === 'GET') {
         return json({ id: session.userId, username: session.username, role: session.role });
@@ -856,10 +1047,12 @@ export default {
         return await handleClientList(env);
       }
 
-      return new Response('Ruta no encontrada', { status: 404, headers: corsHeaders });
+      return new Response('Ruta no encontrada', { status: 404 });
 
     } catch (err) {
-      return json({ error: 'Error interno del servidor', details: err.message }, 500);
+      // El detalle va al log del Worker, nunca a la respuesta (podría filtrar SQL, tablas o columnas).
+      console.error(err);
+      return json({ error: 'Error interno del servidor' }, 500);
     }
   },
 };
