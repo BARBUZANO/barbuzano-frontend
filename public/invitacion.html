@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<title>Crea tu contraseña · barbuzano.com</title>
+<style>
+  /* Ajusta estas variables a las de la web si quieres que coincidan al céntimo. */
+  :root {
+    --bg: #11151b;
+    --surface: #181e26;
+    --line: #2a323d;
+    --text: #e7eaee;
+    --muted: #8d98a8;
+    --accent: #7fb2ff;
+    --ok: #6fcf97;
+    --error: #ff8a7a;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  html { height: 100%; }
+  body {
+    margin: 0;
+    min-height: 100%;
+    display: grid;
+    place-items: center;
+    padding: 1.5rem;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main {
+    width: 100%;
+    max-width: 26rem;
+  }
+  .brand {
+    margin: 0 0 2.5rem;
+    color: var(--muted);
+    font-size: 0.9rem;
+    letter-spacing: 0.02em;
+  }
+  h1 {
+    margin: 0 0 0.75rem;
+    font-size: 1.9rem;
+    line-height: 1.15;
+    font-weight: 650;
+    letter-spacing: -0.015em;
+  }
+  .lede { margin: 0 0 2rem; color: var(--muted); }
+  .field { margin-bottom: 1.4rem; }
+  label { display: block; margin-bottom: 0.4rem; font-weight: 550; font-size: 0.95rem; }
+  .input-row { position: relative; }
+  input[type="password"], input[type="text"] {
+    width: 100%;
+    padding: 0.8rem 5.2rem 0.8rem 0.9rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    color: var(--text);
+    font: inherit;
+  }
+  input:focus-visible, button:focus-visible, a:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  .toggle {
+    position: absolute;
+    top: 50%;
+    right: 0.4rem;
+    transform: translateY(-50%);
+    padding: 0.35rem 0.6rem;
+    background: none;
+    border: 0;
+    border-radius: 4px;
+    color: var(--accent);
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+  }
+  /* Medidor de longitud: se llena hasta los 12 caracteres mínimos. */
+  .gauge {
+    height: 3px;
+    margin-top: 0.6rem;
+    background: var(--line);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  .gauge span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width 0.15s ease-out, background-color 0.15s;
+  }
+  .gauge.full span { background: var(--ok); }
+  .hint { margin: 0.5rem 0 0; color: var(--muted); font-size: 0.88rem; }
+  .submit {
+    width: 100%;
+    padding: 0.85rem 1rem;
+    background: var(--accent);
+    border: 0;
+    border-radius: 6px;
+    color: #0b1220;
+    font: inherit;
+    font-weight: 650;
+    cursor: pointer;
+  }
+  .submit:disabled { opacity: 0.55; cursor: default; }
+  .error { min-height: 1.4rem; margin: 0 0 1rem; color: var(--error); font-size: 0.93rem; }
+  .state a { color: var(--accent); }
+  .state .ok { color: var(--ok); }
+  [hidden] { display: none !important; }
+  @media (prefers-reduced-motion: reduce) {
+    .gauge span { transition: none; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <p class="brand">barbuzano.com</p>
+
+  <!-- Formulario -->
+  <section id="form-view" hidden>
+    <h1>Crea tu contraseña</h1>
+    <p class="lede">Con ella entrarás al área de clientes. La eliges tú y nadie de la asesoría llega a conocerla.</p>
+
+    <form id="form" novalidate>
+      <div class="field">
+        <label for="password">Contraseña</label>
+        <div class="input-row">
+          <input id="password" name="password" type="password" autocomplete="new-password" required>
+          <button type="button" class="toggle" id="toggle" aria-controls="password" aria-pressed="false">Mostrar</button>
+        </div>
+        <div class="gauge" id="gauge" aria-hidden="true"><span></span></div>
+        <p class="hint" id="count" aria-live="polite">Mínimo 12 caracteres. Una frase larga funciona mejor que una palabra con símbolos.</p>
+      </div>
+
+      <div class="field">
+        <label for="confirm">Repite la contraseña</label>
+        <input id="confirm" name="confirm" type="password" autocomplete="new-password" required>
+      </div>
+
+      <p class="error" id="error" role="alert"></p>
+      <button class="submit" id="submit" type="submit">Guardar contraseña</button>
+    </form>
+  </section>
+
+  <!-- Éxito -->
+  <section id="done-view" class="state" hidden>
+    <h1>Contraseña guardada</h1>
+    <p class="lede"><span class="ok">Todo listo.</span> Ya puedes iniciar sesión con tu usuario y la contraseña que acabas de elegir.</p>
+    <p><a id="login-link" href="/">Ir al inicio de sesión</a></p>
+  </section>
+
+  <!-- Enlace inválido -->
+  <section id="invalid-view" class="state" hidden>
+    <h1>Este enlace no es válido</h1>
+    <p class="lede" id="invalid-text">Puede haber caducado o ya se ha usado. Pide uno nuevo a la asesoría.</p>
+  </section>
+</main>
+
+<script>
+(() => {
+  // Si tu página de inicio de sesión no es la raíz, cambia esta ruta.
+  const LOGIN_URL = '/';
+  const MIN_LENGTH = 12;
+  const MAX_BYTES = 72;
+  const TOKEN_RE = /^[A-Za-z0-9_-]{43}$/;
+
+  const $ = (id) => document.getElementById(id);
+  const formView = $('form-view');
+  const doneView = $('done-view');
+  const invalidView = $('invalid-view');
+  const form = $('form');
+  const password = $('password');
+  const confirmField = $('confirm');
+  const toggle = $('toggle');
+  const gauge = $('gauge');
+  const count = $('count');
+  const errorBox = $('error');
+  const submit = $('submit');
+
+  $('login-link').href = LOGIN_URL;
+
+  // El token viaja en el fragmento (#): no llega a ningún servidor hasta que se envía el formulario.
+  const token = decodeURIComponent(location.hash.slice(1));
+
+  function show(view) {
+    for (const v of [formView, doneView, invalidView]) v.hidden = v !== view;
+    const heading = view.querySelector('h1');
+    if (heading) { heading.tabIndex = -1; heading.focus(); }
+  }
+
+  if (!TOKEN_RE.test(token)) {
+    show(invalidView);
+    return;
+  }
+  formView.hidden = false;
+  password.focus();
+
+  password.addEventListener('input', () => {
+    const length = password.value.length;
+    const ratio = Math.min(length / MIN_LENGTH, 1);
+    gauge.firstElementChild.style.width = `${ratio * 100}%`;
+    gauge.classList.toggle('full', length >= MIN_LENGTH);
+    count.textContent = length >= MIN_LENGTH
+      ? `${length} caracteres. Longitud suficiente.`
+      : `${length} de ${MIN_LENGTH} caracteres como mínimo.`;
+  });
+
+  toggle.addEventListener('click', () => {
+    const reveal = password.type === 'password';
+    password.type = reveal ? 'text' : 'password';
+    confirmField.type = reveal ? 'text' : 'password';
+    toggle.textContent = reveal ? 'Ocultar' : 'Mostrar';
+    toggle.setAttribute('aria-pressed', String(reveal));
+  });
+
+  function fail(message) {
+    errorBox.textContent = message;
+  }
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    fail('');
+
+    const value = password.value;
+    if (value.length < MIN_LENGTH) return fail(`La contraseña debe tener al menos ${MIN_LENGTH} caracteres.`);
+    if (new TextEncoder().encode(value).length > MAX_BYTES) return fail(`La contraseña no puede superar ${MAX_BYTES} caracteres.`);
+    if (value !== confirmField.value) return fail('Las dos contraseñas no coinciden.');
+
+    submit.disabled = true;
+    submit.textContent = 'Guardando…';
+    try {
+      const response = await fetch('/api/invite/accept', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token, password: value }),
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (response.ok) {
+        password.value = '';
+        confirmField.value = '';
+        show(doneView);
+        return;
+      }
+      if (response.status === 400 && /enlace/i.test(data.error || '')) {
+        $('invalid-text').textContent = data.error;
+        show(invalidView);
+        return;
+      }
+      fail(data.error || 'No se ha podido guardar la contraseña. Inténtalo de nuevo.');
+    } catch {
+      fail('No hay conexión con el servidor. Comprueba tu red e inténtalo de nuevo.');
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'Guardar contraseña';
+    }
+  });
+})();
+</script>
+</body>
+</html>
