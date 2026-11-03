@@ -868,6 +868,205 @@ async function handleTaskStatus(taskId, request, env, session) {
   }
 }
 
+// ---------- Usuarios e invitaciones ----------
+// Nadie se registra solo: el admin crea la cuenta y obtiene un enlace de un solo uso.
+// El cliente abre el enlace y elige su propia contraseña, así que el admin nunca la conoce.
+// En la base de datos solo se guarda el hash SHA-256 del token, nunca el token en claro.
+
+const USERNAME_RE = /^[A-Za-z0-9._@-]{3,100}$/;
+const INVITE_HOURS = 48;
+const MIN_NEW_PASSWORD_LENGTH = 12;
+const MAX_BCRYPT_BYTES = 72; // bcrypt ignora todo lo que pase de 72 bytes
+const BCRYPT_COST = 10; // mismo coste que el hash ficticio del login
+const INVITE_TOKEN_RE = /^[A-Za-z0-9_-]{43}$/; // 32 bytes en base64url
+
+// 32 bytes aleatorios en base64url (43 caracteres, sin relleno).
+function generateInviteToken() {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+async function sha256Hex(text) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function logUserEvent(db, userId, actorId, eventType) {
+  await db.query(
+    'INSERT INTO user_events (user_id, actor_id, event_type) VALUES (?, ?, ?)',
+    [userId, actorId, eventType]
+  );
+}
+
+// Deja en el usuario un token nuevo (el anterior deja de valer) con caducidad de INVITE_HOURS.
+// Devuelve el token en claro: es la única vez que existe fuera del enlace.
+async function issueInvite(db, userId) {
+  const token = generateInviteToken();
+  await db.query(
+    `UPDATE users SET invite_token_hash = ?, invite_expires = DATE_ADD(NOW(), INTERVAL ${INVITE_HOURS} HOUR) WHERE id = ?`,
+    [await sha256Hex(token), userId]
+  );
+  return token;
+}
+
+function inviteUrl(request, token) {
+  // El token va en el fragmento (#): el navegador no lo envía al servidor ni en el Referer.
+  return `${new URL(request.url).origin}/invitacion#${token}`;
+}
+
+// POST /api/admin/users  { username, role }
+async function handleUserCreate(request, env, session) {
+  const body = await readJson(request);
+  const username = readText(body.username, MAX_USERNAME_LENGTH);
+  const role = body.role === undefined ? 'cliente' : body.role;
+
+  if (!username || !USERNAME_RE.test(username)) {
+    return json({ error: 'Usuario no válido: de 3 a 100 caracteres (letras, números, . _ @ -)' }, 400);
+  }
+  if (role !== 'cliente' && role !== 'admin') return json({ error: 'Rol no válido' }, 400);
+
+  const db = await getDbConnection(env);
+  try {
+    let userId;
+    try {
+      const [result] = await db.query(
+        'INSERT INTO users (username, password_hash, role, created_by) VALUES (?, NULL, ?, ?)',
+        [username, role, session.userId]
+      );
+      userId = result.insertId;
+    } catch (err) {
+      if (err.code === 'ER_DUP_ENTRY') return json({ error: 'Ese usuario ya existe' }, 409);
+      throw err;
+    }
+
+    const token = await issueInvite(db, userId);
+    await logUserEvent(db, userId, session.userId, 'alta');
+    return json(
+      { id: userId, username, role, inviteUrl: inviteUrl(request, token), expiresInHours: INVITE_HOURS },
+      201
+    );
+  } finally {
+    await db.end();
+  }
+}
+
+// GET /api/admin/users
+async function handleUserList(env) {
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query(
+      `SELECT id, username, role, active, created_at,
+              (password_hash IS NULL) AS pending_invite,
+              invite_expires,
+              (invite_expires IS NOT NULL AND invite_expires < NOW()) AS invite_expired
+         FROM users ORDER BY username`
+    );
+    return json(
+      rows.map((u) => ({
+        id: u.id,
+        username: u.username,
+        role: u.role,
+        active: Boolean(u.active),
+        createdAt: u.created_at,
+        pendingInvite: Boolean(u.pending_invite),
+        inviteExpires: u.invite_expires,
+        inviteExpired: Boolean(u.invite_expired),
+      }))
+    );
+  } finally {
+    await db.end();
+  }
+}
+
+// POST /api/admin/users/:id/invite  (enlace nuevo: alta pendiente o restablecer contraseña)
+// Si el usuario ya tenía contraseña, esta sigue valiendo hasta que acepte el enlace nuevo.
+async function handleUserInvite(userIdRaw, request, env, session) {
+  const userId = toId(userIdRaw);
+  if (!userId) return json({ error: 'Usuario no válido' }, 400);
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query('SELECT id, active FROM users WHERE id = ?', [userId]);
+    const user = rows[0];
+    if (!user) return json({ error: 'No encontrado' }, 404);
+    if (!user.active) return json({ error: 'El usuario está desactivado: reactívalo antes de invitarlo' }, 409);
+
+    const token = await issueInvite(db, userId);
+    await logUserEvent(db, userId, session.userId, 'invitacion_regenerada');
+    return json({ inviteUrl: inviteUrl(request, token), expiresInHours: INVITE_HOURS });
+  } finally {
+    await db.end();
+  }
+}
+
+// POST /api/admin/users/:id/deactivate | reactivate
+// La desactivación surte efecto al instante: loadActiveSession consulta `active` en cada petición.
+async function handleUserSetActive(userIdRaw, active, env, session) {
+  const userId = toId(userIdRaw);
+  if (!userId) return json({ error: 'Usuario no válido' }, 400);
+  if (!active && userId === session.userId) {
+    return json({ error: 'No puedes desactivar tu propia cuenta' }, 400);
+  }
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query('SELECT id, active FROM users WHERE id = ?', [userId]);
+    const user = rows[0];
+    if (!user) return json({ error: 'No encontrado' }, 404);
+
+    if (Boolean(user.active) !== active) {
+      await db.query('UPDATE users SET active = ? WHERE id = ?', [active ? 1 : 0, userId]);
+      await logUserEvent(db, userId, session.userId, active ? 'reactivacion' : 'desactivacion');
+    }
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+// POST /api/invite/accept  { token, password }   (público: lo usa el cliente con su enlace)
+async function handleInviteAccept(request, env) {
+  const { token, password } = await readJson(request);
+  const invalidLink = () => json({ error: 'El enlace no es válido o ha caducado. Pide uno nuevo a la asesoría.' }, 400);
+
+  if (typeof token !== 'string' || !INVITE_TOKEN_RE.test(token)) return invalidLink();
+  if (typeof password !== 'string') return json({ error: 'Falta la contraseña' }, 400);
+  if (password.length < MIN_NEW_PASSWORD_LENGTH) {
+    return json({ error: `La contraseña debe tener al menos ${MIN_NEW_PASSWORD_LENGTH} caracteres` }, 400);
+  }
+  if (new TextEncoder().encode(password).length > MAX_BCRYPT_BYTES) {
+    return json({ error: `La contraseña no puede superar ${MAX_BCRYPT_BYTES} caracteres` }, 400);
+  }
+
+  const tokenHash = await sha256Hex(token);
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query(
+      'SELECT id FROM users WHERE invite_token_hash = ? AND invite_expires > NOW() AND active = 1',
+      [tokenHash]
+    );
+    const user = rows[0];
+    if (!user) return invalidLink();
+
+    const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
+
+    // Misma condición que el SELECT: si dos personas usan el enlace a la vez, solo una lo consigue.
+    const [result] = await db.query(
+      `UPDATE users SET password_hash = ?, invite_token_hash = NULL, invite_expires = NULL
+        WHERE id = ? AND invite_token_hash = ? AND invite_expires > NOW() AND active = 1`,
+      [passwordHash, user.id, tokenHash]
+    );
+    if (result.affectedRows !== 1) return invalidLink();
+
+    await logUserEvent(db, user.id, user.id, 'invitacion_aceptada');
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
 // ---------- Login ----------
 
 async function handleLogin(request, env) {
@@ -898,7 +1097,7 @@ async function handleLogin(request, env) {
   const hashToCheck = user?.password_hash || DUMMY_HASH;
   const passwordMatches = await bcrypt.compare(password, hashToCheck);
 
-  if (!user || !user.active || !passwordMatches) {
+  if (!user || !user.active || !user.password_hash || !passwordMatches) {
     return json({ error: 'Usuario o contraseña incorrectos' }, 401);
   }
 
@@ -947,6 +1146,11 @@ export default {
       // --- Logout (público) ---
       if (path === '/api/logout' && request.method === 'POST') {
         return json({ ok: true }, 200, { 'Set-Cookie': CLEAR_SESSION_COOKIE });
+      }
+
+      // --- Aceptar invitación (público: el cliente aún no tiene cuenta activa) ---
+      if (path === '/api/invite/accept' && request.method === 'POST') {
+        return await handleInviteAccept(request, env);
       }
 
       // --- Todo lo demás requiere sesión ---
@@ -1045,6 +1249,24 @@ export default {
       if (path === '/api/clients' && request.method === 'GET') {
         if (session.role !== 'admin') return json({ error: 'No autorizado' }, 403);
         return await handleClientList(env);
+      }
+
+      if (path === '/api/admin/users' || path.startsWith('/api/admin/users/')) {
+        if (session.role !== 'admin') return json({ error: 'No autorizado' }, 403);
+
+        if (path === '/api/admin/users' && request.method === 'GET') {
+          return await handleUserList(env);
+        }
+        if (path === '/api/admin/users' && request.method === 'POST') {
+          return await handleUserCreate(request, env, session);
+        }
+
+        const userActionMatch = path.match(/^\/api\/admin\/users\/(\d+)\/(invite|deactivate|reactivate)$/);
+        if (userActionMatch && request.method === 'POST') {
+          const [, userId, action] = userActionMatch;
+          if (action === 'invite') return await handleUserInvite(userId, request, env, session);
+          return await handleUserSetActive(userId, action === 'reactivate', env, session);
+        }
       }
 
       return new Response('Ruta no encontrada', { status: 404 });
