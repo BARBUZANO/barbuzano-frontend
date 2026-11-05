@@ -159,7 +159,11 @@ function getCookie(request, name) {
 
 async function requireSession(request, env) {
   const cookieValue = getCookie(request, 'session');
-  return await verifySession(cookieValue, env.SESSION_SECRET);
+  const payload = await verifySession(cookieValue, env.SESSION_SECRET);
+  // Los tokens temporales (p. ej. el del paso 2FA) llevan "purpose" y jamás valen como sesión,
+  // aunque alguien copie su valor a la cookie "session".
+  if (!payload || payload.purpose !== undefined) return null;
+  return payload;
 }
 
 // Comprueba en la base de datos que el usuario sigue existiendo y activo, y toma de ahí
@@ -171,12 +175,12 @@ async function loadActiveSession(env, cookieSession) {
   const db = await getDbConnection(env);
   try {
     const [rows] = await db.query(
-      'SELECT id, username, role, active FROM users WHERE id = ?',
+      'SELECT id, username, role, active, totp_enabled FROM users WHERE id = ?',
       [userId]
     );
     const user = rows[0];
     if (!user || !user.active) return null;
-    return { userId: user.id, username: user.username, role: user.role };
+    return { userId: user.id, username: user.username, role: user.role, totpEnabled: Boolean(user.totp_enabled) };
   } finally {
     await db.end();
   }
@@ -958,7 +962,7 @@ async function handleUserList(env) {
   try {
     const [rows] = await db.query(
       `SELECT id, username, role, active, created_at,
-              (password_hash IS NULL) AS pending_invite,
+              (password_hash IS NULL) AS pending_invite, totp_enabled,
               invite_expires,
               (invite_expires IS NOT NULL AND invite_expires < NOW()) AS invite_expired
          FROM users ORDER BY username`
@@ -971,6 +975,7 @@ async function handleUserList(env) {
         active: Boolean(u.active),
         createdAt: u.created_at,
         pendingInvite: Boolean(u.pending_invite),
+        totpEnabled: Boolean(u.totp_enabled),
         inviteExpires: u.invite_expires,
         inviteExpired: Boolean(u.invite_expired),
       }))
@@ -1067,6 +1072,418 @@ async function handleInviteAccept(request, env) {
   }
 }
 
+// ---------- Doble factor (TOTP, RFC 6238) ----------
+// Compatible con Google Authenticator, Microsoft Authenticator, Aegis, 2FAS, Proton Authenticator...
+// - El secreto de cada usuario se guarda CIFRADO (AES-GCM) con el secret del Worker TOTP_ENCRYPTION_KEY,
+//   ligado al id del usuario para que no se pueda copiar de una fila a otra.
+// - Los códigos de recuperación se guardan solo como hash SHA-256 (se muestran una única vez).
+// - Tras acertar la contraseña se emite una cookie temporal "pre2fa" (5 min, solo válida para el paso del
+//   código); la sesión real no se concede hasta que el segundo factor es correcto.
+
+const TOTP_ISSUER = 'Asesoría Barbuzano';
+const TOTP_PERIOD = 30; // segundos por código
+const TOTP_WINDOW = 1; // tolera ±1 intervalo (30 s) de desfase de reloj
+const TOTP_MAX_FAILURES = 5;
+const TOTP_LOCK_MINUTES = 15;
+const TOTP_LOCKED_MESSAGE = `Demasiados intentos fallidos. Inténtalo de nuevo en ${TOTP_LOCK_MINUTES} minutos.`;
+const PRE2FA_MAX_AGE_SECONDS = 300;
+const RECOVERY_CODE_COUNT = 10;
+const RECOVERY_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 símbolos, sin 0/1/I/O
+const RECOVERY_CODE_RE = /^[A-HJ-NP-Z2-9]{10}$/;
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const CLEAR_PRE2FA_COOKIE = 'pre2fa=; HttpOnly; Secure; SameSite=Strict; Path=/api/login; Max-Age=0';
+
+function base32Encode(bytes) {
+  let bits = 0;
+  let value = 0;
+  let out = '';
+  for (const b of bytes) {
+    value = (value << 8) | b;
+    bits += 8;
+    while (bits >= 5) {
+      out += BASE32_ALPHABET[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) out += BASE32_ALPHABET[(value << (5 - bits)) & 31];
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+function base64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+}
+
+function timingSafeEqualStr(a, b) {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
+}
+
+// HOTP (RFC 4226) de 6 dígitos con HMAC-SHA1, que es lo que usan todas las apps autenticadoras.
+async function hotp(secretBytes, counter) {
+  const key = await crypto.subtle.importKey(
+    'raw', secretBytes, { name: 'HMAC', hash: 'SHA-1' }, false, ['sign']
+  );
+  const buf = new ArrayBuffer(8);
+  const view = new DataView(buf);
+  view.setUint32(0, Math.floor(counter / 2 ** 32));
+  view.setUint32(4, counter >>> 0);
+  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, buf));
+  const offset = mac[19] & 0x0f;
+  const bin =
+    ((mac[offset] & 0x7f) << 24) |
+    (mac[offset + 1] << 16) |
+    (mac[offset + 2] << 8) |
+    mac[offset + 3];
+  return String(bin % 1_000_000).padStart(6, '0');
+}
+
+// Devuelve el intervalo de tiempo (step) al que corresponde el código, o null si no vale.
+async function matchTotpStep(secretBytes, code, nowMs = Date.now()) {
+  if (typeof code !== 'string' || !/^\d{6}$/.test(code)) return null;
+  const current = Math.floor(nowMs / 1000 / TOTP_PERIOD);
+  let matched = null;
+  for (let delta = -TOTP_WINDOW; delta <= TOTP_WINDOW; delta++) {
+    const expected = await hotp(secretBytes, current + delta);
+    if (timingSafeEqualStr(expected, code)) matched = current + delta;
+  }
+  return matched;
+}
+
+// ---- Cifrado del secreto en reposo ----
+
+async function totpEncryptionKey(env, usage) {
+  if (!env.TOTP_ENCRYPTION_KEY) throw new Error('Falta el secret TOTP_ENCRYPTION_KEY');
+  const raw = base64ToBytes(env.TOTP_ENCRYPTION_KEY);
+  if (raw.length !== 32) throw new Error('TOTP_ENCRYPTION_KEY debe ser de 32 bytes en base64');
+  return await crypto.subtle.importKey('raw', raw, { name: 'AES-GCM' }, false, [usage]);
+}
+
+const totpAad = (userId) => new TextEncoder().encode(`totp:${userId}`);
+
+async function encryptTotpSecret(env, userId, secretBytes) {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await totpEncryptionKey(env, 'encrypt');
+  const ct = new Uint8Array(
+    await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: totpAad(userId) }, key, secretBytes)
+  );
+  return `${bytesToBase64(iv)}.${bytesToBase64(ct)}`;
+}
+
+async function decryptTotpSecret(env, userId, stored) {
+  const [ivB64, ctB64, extra] = String(stored ?? '').split('.');
+  if (!ivB64 || !ctB64 || extra !== undefined) throw new Error('Secreto TOTP malformado');
+  const key = await totpEncryptionKey(env, 'decrypt');
+  const plain = await crypto.subtle.decrypt(
+    { name: 'AES-GCM', iv: base64ToBytes(ivB64), additionalData: totpAad(userId) },
+    key,
+    base64ToBytes(ctB64)
+  );
+  return new Uint8Array(plain);
+}
+
+// ---- Códigos de recuperación ----
+
+// 10 códigos de 10 caracteres (50 bits cada uno), en su forma normalizada.
+function generateRecoveryCodes() {
+  const codes = [];
+  for (let i = 0; i < RECOVERY_CODE_COUNT; i++) {
+    const bytes = crypto.getRandomValues(new Uint8Array(10));
+    codes.push([...bytes].map((b) => RECOVERY_ALPHABET[b & 31]).join(''));
+  }
+  return codes;
+}
+
+const formatRecoveryCode = (code) => `${code.slice(0, 5)}-${code.slice(5)}`;
+
+// Acepta "123 456", "ABCDE-FGHIJ", minúsculas, etc.
+function normalizeSecondFactorCode(raw) {
+  return String(raw ?? '').replace(/[\s-]/g, '').toUpperCase();
+}
+
+function buildOtpauthUri(username, secretBase32) {
+  const label = `${encodeURIComponent(TOTP_ISSUER)}:${encodeURIComponent(username)}`;
+  return `otpauth://totp/${label}?secret=${secretBase32}&issuer=${encodeURIComponent(TOTP_ISSUER)}&algorithm=SHA1&digits=6&period=${TOTP_PERIOD}`;
+}
+
+// ---- Bloqueo por intentos fallidos del segundo factor ----
+
+async function isTotpLocked(db, userId) {
+  const [rows] = await db.query(
+    'SELECT (totp_locked_until IS NOT NULL AND totp_locked_until > NOW()) AS locked FROM users WHERE id = ?',
+    [userId]
+  );
+  return Boolean(rows[0]?.locked);
+}
+
+async function registerTotpFailure(db, userId) {
+  await db.query('UPDATE users SET totp_failed_attempts = totp_failed_attempts + 1 WHERE id = ?', [userId]);
+  const [rows] = await db.query('SELECT totp_failed_attempts AS n FROM users WHERE id = ?', [userId]);
+  if ((rows[0]?.n ?? 0) >= TOTP_MAX_FAILURES) {
+    await db.query(
+      `UPDATE users SET totp_failed_attempts = 0, totp_locked_until = DATE_ADD(NOW(), INTERVAL ${TOTP_LOCK_MINUTES} MINUTE) WHERE id = ?`,
+      [userId]
+    );
+    await logUserEvent(db, userId, userId, 'twofa_bloqueo');
+  }
+}
+
+async function clearTotpFailures(db, userId) {
+  await db.query('UPDATE users SET totp_failed_attempts = 0, totp_locked_until = NULL WHERE id = ?', [userId]);
+}
+
+// Comprueba un código TOTP o un código de recuperación. Devuelve 'totp', 'recovery' o null.
+// - TOTP: no se acepta el mismo intervalo dos veces (anti-reutilización) ni uno anterior al último usado.
+// - Recuperación: cada código vale una sola vez.
+// `user` debe traer id y totp_secret_enc.
+async function verifySecondFactor(db, env, user, rawCode) {
+  const code = normalizeSecondFactorCode(rawCode);
+
+  if (/^\d{6}$/.test(code)) {
+    if (!user.totp_secret_enc) return null;
+    const secret = await decryptTotpSecret(env, user.id, user.totp_secret_enc);
+    const step = await matchTotpStep(secret, code);
+    if (step === null) return null;
+    const [result] = await db.query(
+      'UPDATE users SET totp_last_step = ? WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)',
+      [step, user.id, step]
+    );
+    return result.affectedRows === 1 ? 'totp' : null;
+  }
+
+  if (RECOVERY_CODE_RE.test(code)) {
+    const [result] = await db.query(
+      'UPDATE user_recovery_codes SET used_at = NOW() WHERE user_id = ? AND code_hash = ? AND used_at IS NULL',
+      [user.id, await sha256Hex(code)]
+    );
+    return result.affectedRows === 1 ? 'recovery' : null;
+  }
+
+  return null;
+}
+
+// Respuesta con varias cookies (json() solo admite una cabecera Set-Cookie).
+function jsonWithCookies(data, status, cookies) {
+  const headers = new Headers(baseHeaders);
+  for (const cookie of cookies) headers.append('Set-Cookie', cookie);
+  return new Response(JSON.stringify(data), { status, headers });
+}
+
+async function sessionCookieFor(user, env) {
+  const sessionToken = await signSession(
+    {
+      userId: user.id,
+      username: user.username,
+      role: user.role,
+      exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
+    },
+    env.SESSION_SECRET
+  );
+  return `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+}
+
+// ---- Paso 2 del login: POST /api/login/2fa  { code }  (público, pero exige la cookie pre2fa) ----
+async function handleLogin2fa(request, env) {
+  const expired = () =>
+    json({ error: 'La verificación ha caducado. Vuelve a introducir usuario y contraseña.' }, 401, {
+      'Set-Cookie': CLEAR_PRE2FA_COOKIE,
+    });
+
+  const pre = await verifySession(getCookie(request, 'pre2fa'), env.SESSION_SECRET);
+  if (!pre || pre.purpose !== '2fa') return expired();
+  const userId = toId(pre.userId);
+  if (!userId) return expired();
+
+  const { code } = await readJson(request);
+  if (typeof code !== 'string' || !code.trim() || code.length > 32) {
+    return json({ error: 'Introduce el código de 6 dígitos o un código de recuperación' }, 400);
+  }
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query(
+      'SELECT id, username, role, active, totp_enabled, totp_secret_enc FROM users WHERE id = ?',
+      [userId]
+    );
+    const user = rows[0];
+    if (!user || !user.active || !user.totp_enabled) return expired();
+
+    if (await isTotpLocked(db, user.id)) return json({ error: TOTP_LOCKED_MESSAGE }, 429);
+
+    const method = await verifySecondFactor(db, env, user, code);
+    if (!method) {
+      await registerTotpFailure(db, user.id);
+      return json({ error: 'Código incorrecto' }, 401);
+    }
+
+    await clearTotpFailures(db, user.id);
+
+    let recoveryCodesLeft;
+    if (method === 'recovery') {
+      await logUserEvent(db, user.id, user.id, 'twofa_codigo_recuperacion_usado');
+      const [left] = await db.query(
+        'SELECT COUNT(*) AS n FROM user_recovery_codes WHERE user_id = ? AND used_at IS NULL',
+        [user.id]
+      );
+      recoveryCodesLeft = Number(left[0]?.n ?? 0);
+    }
+
+    return jsonWithCookies(
+      {
+        message: 'Autenticación exitosa',
+        user: { id: user.id, username: user.username, role: user.role },
+        ...(method === 'recovery' ? { recoveryCodeUsed: true, recoveryCodesLeft } : {}),
+      },
+      200,
+      [await sessionCookieFor(user, env), CLEAR_PRE2FA_COOKIE]
+    );
+  } finally {
+    await db.end();
+  }
+}
+
+// ---- Activación y desactivación (usuario con sesión) ----
+
+// POST /api/2fa/setup  → genera un secreto nuevo (aún sin activar) y devuelve lo necesario para el QR.
+async function handleTotpSetup(env, session) {
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query('SELECT totp_enabled FROM users WHERE id = ?', [session.userId]);
+    if (!rows[0]) return json({ error: 'No encontrado' }, 404);
+    if (rows[0].totp_enabled) return json({ error: 'El doble factor ya está activado' }, 409);
+
+    const secret = crypto.getRandomValues(new Uint8Array(20)); // 160 bits, el tamaño recomendado
+    const encrypted = await encryptTotpSecret(env, session.userId, secret);
+    await db.query(
+      'UPDATE users SET totp_secret_enc = ?, totp_last_step = NULL WHERE id = ? AND totp_enabled = 0',
+      [encrypted, session.userId]
+    );
+
+    const secretBase32 = base32Encode(secret);
+    return json({ secret: secretBase32, otpauthUri: buildOtpauthUri(session.username, secretBase32) });
+  } finally {
+    await db.end();
+  }
+}
+
+// POST /api/2fa/enable  { code }  → confirma con un primer código, activa y entrega los códigos de recuperación.
+async function handleTotpEnable(request, env, session) {
+  const { code } = await readJson(request);
+  const clean = normalizeSecondFactorCode(code);
+  if (!/^\d{6}$/.test(clean)) return json({ error: 'Introduce el código de 6 dígitos de la app' }, 400);
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query('SELECT totp_enabled, totp_secret_enc FROM users WHERE id = ?', [session.userId]);
+    const user = rows[0];
+    if (!user) return json({ error: 'No encontrado' }, 404);
+    if (user.totp_enabled) return json({ error: 'El doble factor ya está activado' }, 409);
+    if (!user.totp_secret_enc) return json({ error: 'Empieza primero la activación' }, 409);
+
+    const secret = await decryptTotpSecret(env, session.userId, user.totp_secret_enc);
+    if ((await matchTotpStep(secret, clean)) === null) {
+      return json({ error: 'Código incorrecto. Comprueba que la hora del móvil es la correcta.' }, 400);
+    }
+
+    const [result] = await db.query(
+      `UPDATE users SET totp_enabled = 1, totp_last_step = NULL, totp_failed_attempts = 0, totp_locked_until = NULL
+        WHERE id = ? AND totp_enabled = 0`,
+      [session.userId]
+    );
+    if (result.affectedRows !== 1) return json({ error: 'El doble factor ya está activado' }, 409);
+
+    const codes = generateRecoveryCodes();
+    await db.query('DELETE FROM user_recovery_codes WHERE user_id = ?', [session.userId]);
+    const hashes = await Promise.all(codes.map((c) => sha256Hex(c)));
+    await db.query('INSERT INTO user_recovery_codes (user_id, code_hash) VALUES ?', [
+      hashes.map((h) => [session.userId, h]),
+    ]);
+    await logUserEvent(db, session.userId, session.userId, 'twofa_activado');
+
+    return json({ ok: true, recoveryCodes: codes.map(formatRecoveryCode) });
+  } finally {
+    await db.end();
+  }
+}
+
+// POST /api/2fa/disable  { password, code }  → pide contraseña Y un código (TOTP o de recuperación).
+async function handleTotpDisable(request, env, session) {
+  const { password, code } = await readJson(request);
+  if (
+    typeof password !== 'string' || !password || password.length > MAX_PASSWORD_LENGTH ||
+    typeof code !== 'string' || !code.trim() || code.length > 32
+  ) {
+    return json({ error: 'Faltan la contraseña o el código' }, 400);
+  }
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query(
+      'SELECT id, password_hash, totp_enabled, totp_secret_enc FROM users WHERE id = ?',
+      [session.userId]
+    );
+    const user = rows[0];
+    if (!user) return json({ error: 'No encontrado' }, 404);
+    if (!user.totp_enabled) return json({ error: 'El doble factor no está activado' }, 409);
+    if (await isTotpLocked(db, user.id)) return json({ error: TOTP_LOCKED_MESSAGE }, 429);
+
+    // La contraseña se comprueba primero, para no "gastar" un código válido si la contraseña es incorrecta.
+    const passwordOk = user.password_hash ? await bcrypt.compare(password, user.password_hash) : false;
+    const method = passwordOk ? await verifySecondFactor(db, env, user, code) : null;
+    if (!method) {
+      await registerTotpFailure(db, user.id);
+      return json({ error: 'Contraseña o código incorrectos' }, 401);
+    }
+
+    await db.query(
+      `UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = NULL,
+              totp_failed_attempts = 0, totp_locked_until = NULL
+        WHERE id = ?`,
+      [user.id]
+    );
+    await db.query('DELETE FROM user_recovery_codes WHERE user_id = ?', [user.id]);
+    await logUserEvent(db, user.id, user.id, 'twofa_desactivado');
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
+// POST /api/admin/users/:id/reset-2fa  (solo admin) → para quien ha perdido el móvil y los códigos de recuperación.
+// Verifica la identidad de la persona por otro canal antes de hacerlo.
+async function handleUserReset2fa(userIdRaw, env, session) {
+  const userId = toId(userIdRaw);
+  if (!userId) return json({ error: 'Usuario no válido' }, 400);
+  if (userId === session.userId) {
+    return json({ error: 'No puedes reiniciar tu propio doble factor desde aquí: usa «Desactivar» con tu contraseña y un código' }, 400);
+  }
+
+  const db = await getDbConnection(env);
+  try {
+    const [rows] = await db.query('SELECT id FROM users WHERE id = ?', [userId]);
+    if (!rows[0]) return json({ error: 'No encontrado' }, 404);
+
+    await db.query(
+      `UPDATE users SET totp_enabled = 0, totp_secret_enc = NULL, totp_last_step = NULL,
+              totp_failed_attempts = 0, totp_locked_until = NULL
+        WHERE id = ?`,
+      [userId]
+    );
+    await db.query('DELETE FROM user_recovery_codes WHERE user_id = ?', [userId]);
+    await logUserEvent(db, userId, session.userId, 'twofa_reiniciado');
+    return json({ ok: true });
+  } finally {
+    await db.end();
+  }
+}
+
 // ---------- Login ----------
 
 async function handleLogin(request, env) {
@@ -1084,7 +1501,7 @@ async function handleLogin(request, env) {
   let user;
   try {
     const [rows] = await db.query(
-      'SELECT id, username, password_hash, active, role FROM users WHERE username = ?',
+      'SELECT id, username, password_hash, active, role, totp_enabled FROM users WHERE username = ?',
       [username]
     );
     user = rows[0];
@@ -1101,20 +1518,22 @@ async function handleLogin(request, env) {
     return json({ error: 'Usuario o contraseña incorrectos' }, 401);
   }
 
-  const sessionToken = await signSession(
-    {
-      userId: user.id,
-      username: user.username,
-      role: user.role,
-      exp: Date.now() + SESSION_MAX_AGE_SECONDS * 1000,
-    },
-    env.SESSION_SECRET
-  );
+  // Contraseña correcta, pero con doble factor activado todavía no hay sesión:
+  // solo una cookie temporal que únicamente sirve en /api/login/2fa.
+  if (user.totp_enabled) {
+    const preToken = await signSession(
+      { userId: user.id, purpose: '2fa', exp: Date.now() + PRE2FA_MAX_AGE_SECONDS * 1000 },
+      env.SESSION_SECRET
+    );
+    return json({ twoFactorRequired: true }, 200, {
+      'Set-Cookie': `pre2fa=${preToken}; HttpOnly; Secure; SameSite=Strict; Path=/api/login; Max-Age=${PRE2FA_MAX_AGE_SECONDS}`,
+    });
+  }
 
   return json(
     { message: 'Autenticación exitosa', user: { id: user.id, username: user.username, role: user.role } },
     200,
-    { 'Set-Cookie': `session=${sessionToken}; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}` }
+    { 'Set-Cookie': await sessionCookieFor(user, env) }
   );
 }
 
@@ -1145,7 +1564,12 @@ export default {
 
       // --- Logout (público) ---
       if (path === '/api/logout' && request.method === 'POST') {
-        return json({ ok: true }, 200, { 'Set-Cookie': CLEAR_SESSION_COOKIE });
+        return jsonWithCookies({ ok: true }, 200, [CLEAR_SESSION_COOKIE, CLEAR_PRE2FA_COOKIE]);
+      }
+
+      // --- Login, paso 2: código del segundo factor (público, pero exige la cookie pre2fa) ---
+      if (path === '/api/login/2fa' && request.method === 'POST') {
+        return await handleLogin2fa(request, env);
       }
 
       // --- Aceptar invitación (público: el cliente aún no tiene cuenta activa) ---
@@ -1164,7 +1588,20 @@ export default {
       }
 
       if (path === '/api/me' && request.method === 'GET') {
-        return json({ id: session.userId, username: session.username, role: session.role });
+        return json({
+          id: session.userId, username: session.username, role: session.role, totpEnabled: session.totpEnabled,
+        });
+      }
+
+      // --- Doble factor (TOTP): activar / desactivar ---
+      if (path === '/api/2fa/setup' && request.method === 'POST') {
+        return await handleTotpSetup(env, session);
+      }
+      if (path === '/api/2fa/enable' && request.method === 'POST') {
+        return await handleTotpEnable(request, env, session);
+      }
+      if (path === '/api/2fa/disable' && request.method === 'POST') {
+        return await handleTotpDisable(request, env, session);
       }
 
       if (path === '/api/files/upload' && request.method === 'POST') {
@@ -1261,10 +1698,11 @@ export default {
           return await handleUserCreate(request, env, session);
         }
 
-        const userActionMatch = path.match(/^\/api\/admin\/users\/(\d+)\/(invite|deactivate|reactivate)$/);
+        const userActionMatch = path.match(/^\/api\/admin\/users\/(\d+)\/(invite|deactivate|reactivate|reset-2fa)$/);
         if (userActionMatch && request.method === 'POST') {
           const [, userId, action] = userActionMatch;
           if (action === 'invite') return await handleUserInvite(userId, request, env, session);
+          if (action === 'reset-2fa') return await handleUserReset2fa(userId, env, session);
           return await handleUserSetActive(userId, action === 'reactivate', env, session);
         }
       }
