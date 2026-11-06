@@ -372,11 +372,37 @@ const loginError = document.getElementById('login-error');
 const usernameInput = document.getElementById('username');
 const passwordInput = document.getElementById('password');
 
+// Paso 2 del login (código de la app autenticadora o de recuperación)
+const loginTitle = document.getElementById('login-title');
+const loginSubtitle = document.getElementById('login-subtitle');
+const loginForgot = document.getElementById('login-forgot');
+const twoFaForm = document.getElementById('login-2fa-form');
+const twoFaInput = document.getElementById('totp-code');
+const twoFaError = document.getElementById('login-2fa-error');
+const twoFaBack = document.getElementById('login-2fa-back');
+
+const LOGIN_ERROR_DEFAULT = loginError.textContent;
+const LOGIN_TEXT = { title: loginTitle.textContent, subtitle: loginSubtitle.textContent };
+const TWOFA_SUBTITLE =
+  'Introduce el código de 6 dígitos de tu app autenticadora. Si no puedes acceder a ella, usa uno de tus códigos de recuperación.';
+
+function showLoginStep(step, focus = true) {
+  const second = step === 'code';
+  loginForm.style.display = second ? 'none' : '';
+  twoFaForm.style.display = second ? '' : 'none';
+  loginForgot.style.display = second ? 'none' : '';
+  loginTitle.textContent = second ? 'Verificación en dos pasos' : LOGIN_TEXT.title;
+  loginSubtitle.textContent = second ? TWOFA_SUBTITLE : LOGIN_TEXT.subtitle;
+  twoFaError.hidden = true;
+  if (second) twoFaInput.value = '';
+  if (focus) setTimeout(() => (second ? twoFaInput : usernameInput).focus(), 50);
+}
+
 function openLogin() {
   loginOverlay.classList.add('is-open');
   loginOverlay.setAttribute('aria-hidden', 'false');
   loginError.hidden = true;
-  setTimeout(() => usernameInput.focus(), 50);
+  showLoginStep('credentials');
   document.addEventListener('keydown', onKeydown);
 }
 
@@ -384,6 +410,8 @@ function closeLogin() {
   loginOverlay.classList.remove('is-open');
   loginOverlay.setAttribute('aria-hidden', 'true');
   loginForm.reset();
+  twoFaForm.reset();
+  showLoginStep('credentials', false);
   document.removeEventListener('keydown', onKeydown);
 }
 
@@ -401,6 +429,7 @@ loginOverlay.addEventListener('click', (e) => {
 loginForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   loginError.hidden = true;
+  loginError.textContent = LOGIN_ERROR_DEFAULT;
 
   const username = usernameInput.value.trim();
   const password = passwordInput.value;
@@ -420,6 +449,15 @@ loginForm.addEventListener('submit', async (e) => {
       return;
     }
 
+    const data = await response.json().catch(() => ({}));
+
+    // Contraseña correcta, pero la cuenta tiene doble factor: aún no hay sesión, falta el código.
+    if (data.twoFactorRequired) {
+      passwordInput.value = '';
+      showLoginStep('code');
+      return;
+    }
+
     // Login correcto: la cookie de sesión ya la puso el servidor.
     // Redirigimos al área de clientes, que exige esa cookie para dejarte entrar.
     window.location.href = '/clientes';
@@ -427,5 +465,62 @@ loginForm.addEventListener('submit', async (e) => {
     loginError.hidden = false;
   } finally {
     submitBtn.disabled = false;
+  }
+});
+
+// ---- Paso 2: código del segundo factor ----
+twoFaBack.addEventListener('click', (e) => {
+  e.preventDefault();
+  showLoginStep('credentials');
+});
+
+twoFaForm.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  twoFaError.hidden = true;
+
+  const code = twoFaInput.value.trim();
+  if (!code) {
+    twoFaInput.focus();
+    return;
+  }
+
+  const btn = document.getElementById('login-2fa-btn');
+  btn.disabled = true;
+
+  try {
+    const response = await fetch('/api/login/2fa', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code }),
+    });
+    const data = await response.json().catch(() => ({}));
+
+    if (!response.ok) {
+      // Pasaron más de 5 minutos desde la contraseña: hay que empezar de nuevo.
+      if (data.expired) {
+        showLoginStep('credentials');
+        loginError.textContent = data.error || LOGIN_ERROR_DEFAULT;
+        loginError.hidden = false;
+        return;
+      }
+      twoFaError.textContent = data.error || 'No se ha podido verificar el código.';
+      twoFaError.hidden = false;
+      twoFaInput.select();
+      return;
+    }
+
+    if (data.recoveryCodeUsed) {
+      const left = Number(data.recoveryCodesLeft ?? 0);
+      alert(
+        `Has entrado con un código de recuperación. Te ${left === 1 ? 'queda 1 código' : `quedan ${left} códigos`}.\n\n` +
+        'Cuando puedas, ve a Seguridad (icono del escudo), desactiva la verificación en dos pasos y vuelve a activarla para obtener códigos nuevos.'
+      );
+    }
+    window.location.href = '/clientes';
+  } catch (err) {
+    twoFaError.textContent = 'No se ha podido conectar. Inténtalo de nuevo.';
+    twoFaError.hidden = false;
+  } finally {
+    btn.disabled = false;
   }
 });
