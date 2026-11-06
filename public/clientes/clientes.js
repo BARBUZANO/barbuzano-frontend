@@ -101,6 +101,10 @@
   const taskArchiveListEl = $('#task-archive-list');
   const taskArchiveCountEl = $('#task-archive-count');
 
+  const client2faEl = $('#client-2fa');
+  const client2faMsgEl = $('#client-2fa-msg');
+  const client2faResetBtn = $('#client-2fa-reset');
+
   // ---------- Utilidades ----------
 
   // Los nombres de archivo y carpeta los escriben los usuarios: siempre se escapan.
@@ -180,8 +184,11 @@
   // ---------- Capa de red ----------
 
   async function api(path, options = {}) {
-    const res = await fetch(API + path, { credentials: 'same-origin', ...options });
-    if (res.status === 401) {
+    // keepOn401: para las llamadas de seguridad, donde un 401 significa "contraseña o código
+    // incorrectos" y no "sesión caducada".
+    const { keepOn401, ...fetchOptions } = options;
+    const res = await fetch(API + path, { credentials: 'same-origin', ...fetchOptions });
+    if (res.status === 401 && !keepOn401) {
       // Sesión caducada o inexistente: de vuelta a la página de inicio.
       window.location.href = '/';
       throw new Error('Sesión caducada');
@@ -286,6 +293,11 @@
         </button>
       </li>
     `).join('');
+
+    // Aviso + botón para reiniciar el 2FA del cliente seleccionado (si lo tiene activado).
+    const selected = currentClient();
+    client2faEl.hidden = !(selected && selected.totpEnabled);
+    if (selected) client2faMsgEl.textContent = `${selected.username} tiene la verificación en dos pasos activada.`;
   }
 
   // ---------- Render: carpetas ----------
@@ -1044,6 +1056,230 @@
   });
 
   applyTheme(document.documentElement.dataset.theme === 'light' ? 'light' : 'dark', false);
+
+  // ---------- Reiniciar el 2FA de un cliente (solo asesor) ----------
+  client2faResetBtn.addEventListener('click', async () => {
+    const client = currentClient();
+    if (!client) return;
+    const ok = confirm(
+      `¿Reiniciar la verificación en dos pasos de «${client.username}»?\n\n` +
+      'Hazlo solo si has comprobado su identidad por otro canal (por ejemplo, llamándole). ' +
+      'Podrá volver a activarla desde Seguridad.'
+    );
+    if (!ok) return;
+    try {
+      await apiJson(`/admin/users/${encodeURIComponent(client.id)}/reset-2fa`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      client.totpEnabled = false;
+      renderClients();
+    } catch (err) {
+      showError(err.message);
+    }
+  });
+
+  // ---------- Seguridad: verificación en dos pasos (TOTP) ----------
+  // El secreto y los códigos de recuperación solo viven en pantalla mientras el cuadro está abierto.
+
+  const secOverlay = $('#sec-modal-overlay');
+  const secViews = {
+    off: $('#sec-view-off'),
+    setup: $('#sec-view-setup'),
+    codes: $('#sec-view-codes'),
+    on: $('#sec-view-on'),
+  };
+  const secStatusEl = $('#sec-2fa-status');
+  const secTextEl = $('#sec-2fa-text');
+  const secQrEl = $('#sec-qr');
+  const secSecretEl = $('#sec-secret');
+  const secEnableCode = $('#sec-enable-code');
+  const secEnableError = $('#sec-enable-error');
+  const secCodesEl = $('#sec-codes');
+  const secOffPassword = $('#sec-off-password');
+  const secOffCode = $('#sec-off-code');
+  const secOffError = $('#sec-off-error');
+
+  const SEC_TEXT = {
+    off: 'Añade una segunda capa de protección: además de la contraseña, se pedirá un código que genera una app en tu móvil.',
+    on: 'Tu cuenta está protegida con verificación en dos pasos.',
+  };
+
+  let secView = 'off';
+  let secRecoveryCodes = [];
+
+  const postJson = (path, body) => apiJson(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    keepOn401: true,
+  });
+
+  function showSecView(name) {
+    secView = name;
+    for (const [key, el] of Object.entries(secViews)) el.hidden = key !== name;
+    const active = name === 'on' || name === 'codes';
+    secStatusEl.textContent = active ? 'Activada' : 'Desactivada';
+    secStatusEl.className = 'status-pill' + (active ? ' status-aceptado' : '');
+    secTextEl.textContent = SEC_TEXT[name] || '';
+    secTextEl.hidden = !secTextEl.textContent;
+  }
+
+  function clearSecSensitive() {
+    secRecoveryCodes = [];
+    secCodesEl.innerHTML = '';
+    secQrEl.innerHTML = '';
+    secSecretEl.textContent = '';
+    secEnableCode.value = '';
+    secOffPassword.value = '';
+    secOffCode.value = '';
+    secEnableError.hidden = true;
+    secOffError.hidden = true;
+  }
+
+  function openSecurity() {
+    clearSecSensitive();
+    showSecView(state.me?.totpEnabled ? 'on' : 'off');
+    secOverlay.classList.add('is-open');
+    secOverlay.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeSecurity() {
+    if (secView === 'codes' &&
+        !confirm('Si cierras ahora no podrás volver a ver los códigos de recuperación. ¿Cerrar igualmente?')) {
+      return;
+    }
+    clearSecSensitive();
+    secOverlay.classList.remove('is-open');
+    secOverlay.setAttribute('aria-hidden', 'true');
+  }
+
+  $('#security-btn').addEventListener('click', openSecurity);
+  $('#sec-modal-close').addEventListener('click', closeSecurity);
+  secOverlay.addEventListener('click', (e) => { if (e.target === secOverlay) closeSecurity(); });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && secOverlay.classList.contains('is-open')) closeSecurity();
+  });
+
+  // 1) Pedir un secreto nuevo y enseñar el QR
+  $('#sec-start-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    btn.disabled = true;
+    try {
+      const { secret, otpauthUri } = await postJson('/2fa/setup', {});
+      secQrEl.innerHTML = '';
+      if (typeof qrcode === 'function') {
+        const qr = qrcode(0, 'M');
+        qr.addData(otpauthUri);
+        qr.make();
+        secQrEl.innerHTML = qr.createSvgTag({ cellSize: 4, margin: 2, scalable: true });
+      }
+      secQrEl.hidden = !secQrEl.innerHTML;
+      secSecretEl.textContent = secret.match(/.{1,4}/g).join(' ');
+      secEnableError.hidden = true;
+      showSecView('setup');
+      secEnableCode.focus();
+    } catch (err) {
+      showError(err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+
+  $('#sec-cancel-btn').addEventListener('click', () => {
+    clearSecSensitive();
+    showSecView('off');
+  });
+
+  // 2) Confirmar con el primer código y recibir los códigos de recuperación
+  async function enableTwoFactor() {
+    const code = secEnableCode.value.trim();
+    if (!code) { secEnableCode.focus(); return; }
+    const btn = $('#sec-enable-btn');
+    btn.disabled = true;
+    secEnableError.hidden = true;
+    try {
+      const data = await postJson('/2fa/enable', { code });
+      state.me.totpEnabled = true;
+      secRecoveryCodes = data.recoveryCodes || [];
+      secCodesEl.innerHTML = secRecoveryCodes.map((c) => `<li>${esc(c)}</li>`).join('');
+      secQrEl.innerHTML = '';
+      secSecretEl.textContent = '';
+      secEnableCode.value = '';
+      showSecView('codes');
+    } catch (err) {
+      secEnableError.textContent = err.message;
+      secEnableError.hidden = false;
+      secEnableCode.select();
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  $('#sec-enable-btn').addEventListener('click', enableTwoFactor);
+  secEnableCode.addEventListener('keydown', (e) => { if (e.key === 'Enter') enableTwoFactor(); });
+
+  // 3) Guardar los códigos de recuperación
+  $('#sec-copy-btn').addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    try {
+      await navigator.clipboard.writeText(secRecoveryCodes.join('\n'));
+      btn.textContent = 'Copiados';
+      setTimeout(() => { btn.textContent = 'Copiar'; }, 2000);
+    } catch (err) {
+      showError('No se han podido copiar. Selecciónalos y cópialos a mano.');
+    }
+  });
+
+  $('#sec-download-btn').addEventListener('click', () => {
+    const text =
+      'Códigos de recuperación — Barbuzano Firma de Asesores\n' +
+      `Usuario: ${state.me.username}\n` +
+      'Cada código sirve una sola vez. Guárdalos en un lugar seguro.\n\n' +
+      secRecoveryCodes.join('\n') + '\n';
+    const url = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'codigos-recuperacion-barbuzano.txt';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  });
+
+  $('#sec-done-btn').addEventListener('click', () => {
+    clearSecSensitive();
+    showSecView('on');
+  });
+
+  // 4) Desactivar (contraseña + código)
+  async function disableTwoFactor() {
+    const password = secOffPassword.value;
+    const code = secOffCode.value.trim();
+    secOffError.hidden = true;
+    if (!password || !code) {
+      secOffError.textContent = 'Introduce tu contraseña y un código.';
+      secOffError.hidden = false;
+      return;
+    }
+    if (!confirm('¿Desactivar la verificación en dos pasos? Tu cuenta quedará protegida solo con la contraseña.')) return;
+
+    const btn = $('#sec-disable-btn');
+    btn.disabled = true;
+    try {
+      await postJson('/2fa/disable', { password, code });
+      state.me.totpEnabled = false;
+      clearSecSensitive();
+      showSecView('off');
+    } catch (err) {
+      secOffError.textContent = err.message;
+      secOffError.hidden = false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+  $('#sec-disable-btn').addEventListener('click', disableTwoFactor);
+  secOffCode.addEventListener('keydown', (e) => { if (e.key === 'Enter') disableTwoFactor(); });
 
   // ---------- Cerrar sesión ----------
   $('#logout-btn').addEventListener('click', async () => {
