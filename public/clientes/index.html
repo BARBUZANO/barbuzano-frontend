@@ -54,6 +54,10 @@
           <span class="user-name" id="user-name">Sebas</span>
         </div>
 
+        <button type="button" class="icon-btn" id="security-btn" title="Seguridad de la cuenta" aria-label="Seguridad de la cuenta">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6l7-3z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" fill="none"/></svg>
+        </button>
+
         <button type="button" class="icon-btn" id="logout-btn" title="Cerrar sesión" aria-label="Cerrar sesión">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3M10 17l5-5-5-5M15 12H3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>
         </button>
@@ -68,6 +72,11 @@
         <div class="sidebar-section" id="client-switcher-section" hidden>
           <span class="sidebar-label">Clientes</span>
           <ul class="client-list" id="client-list"></ul>
+
+          <div class="client-2fa" id="client-2fa" hidden>
+            <p id="client-2fa-msg"></p>
+            <button type="button" class="pill-btn outline-btn" id="client-2fa-reset">Reiniciar 2FA</button>
+          </div>
         </div>
 
         <div class="sidebar-section">
@@ -213,6 +222,81 @@
     </div>
   </div>
 
+  <!-- ---------- Modal: seguridad de la cuenta (verificación en dos pasos) ---------- -->
+  <div class="file-modal-overlay" id="sec-modal-overlay" aria-hidden="true">
+    <div class="sec-modal" role="dialog" aria-modal="true" aria-labelledby="sec-modal-title">
+      <button type="button" class="login-close" id="sec-modal-close" aria-label="Cerrar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>
+      </button>
+
+      <h2 id="sec-modal-title">Seguridad de la cuenta</h2>
+
+      <div class="sec-head">
+        <h3>Verificación en dos pasos</h3>
+        <span class="status-pill" id="sec-2fa-status">Desactivada</span>
+      </div>
+      <p class="sec-text" id="sec-2fa-text"></p>
+
+      <!-- Desactivada -->
+      <div id="sec-view-off">
+        <div class="file-modal-actions">
+          <button type="button" class="pill-btn" id="sec-start-btn">Activar verificación en dos pasos</button>
+        </div>
+      </div>
+
+      <!-- Configurando: QR + primer código -->
+      <div id="sec-view-setup" hidden>
+        <ol class="sec-steps">
+          <li>Abre tu app autenticadora (Google Authenticator, Microsoft Authenticator, Aegis…) y añade una cuenta nueva.</li>
+          <li>
+            Escanea este código QR.
+            <div class="qr-box" id="sec-qr"></div>
+            ¿No puedes escanearlo? Introduce esta clave a mano: <span id="sec-secret"></span>
+          </li>
+          <li>Escribe aquí el código de 6 dígitos que muestra la app.</li>
+        </ol>
+        <label class="login-field">
+          <span>Código de 6 dígitos</span>
+          <input type="text" id="sec-enable-code" inputmode="numeric" autocomplete="one-time-code" maxlength="8" placeholder="123456">
+        </label>
+        <p class="sec-error" id="sec-enable-error" role="alert" hidden></p>
+        <div class="file-modal-actions">
+          <button type="button" class="pill-btn outline-btn" id="sec-cancel-btn">Cancelar</button>
+          <button type="button" class="pill-btn" id="sec-enable-btn">Activar</button>
+        </div>
+      </div>
+
+      <!-- Códigos de recuperación (se muestran una sola vez) -->
+      <div id="sec-view-codes" hidden>
+        <p class="sec-text"><strong>Guarda estos códigos de recuperación en un lugar seguro.</strong> Si pierdes el móvil, cada uno te permite entrar una sola vez. No volverán a mostrarse.</p>
+        <ul class="recovery-list" id="sec-codes"></ul>
+        <div class="file-modal-actions">
+          <button type="button" class="pill-btn outline-btn" id="sec-copy-btn">Copiar</button>
+          <button type="button" class="pill-btn outline-btn" id="sec-download-btn">Descargar .txt</button>
+          <button type="button" class="pill-btn" id="sec-done-btn">Ya los he guardado</button>
+        </div>
+      </div>
+
+      <!-- Activada: desactivar -->
+      <div id="sec-view-on" hidden>
+        <p class="sec-text">Para desactivarla, confirma tu contraseña y un código de la app (o uno de recuperación).</p>
+        <label class="login-field">
+          <span>Contraseña</span>
+          <input type="password" id="sec-off-password" autocomplete="current-password">
+        </label>
+        <label class="login-field">
+          <span>Código de la app o de recuperación</span>
+          <input type="text" id="sec-off-code" autocomplete="one-time-code" maxlength="16">
+        </label>
+        <p class="sec-error" id="sec-off-error" role="alert" hidden></p>
+        <div class="file-modal-actions">
+          <button type="button" class="pill-btn ghost-btn" id="sec-disable-btn">Desactivar</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="qrcode.js"></script>
   <script src="clientes.js"></script>
 </body>
 </html>
