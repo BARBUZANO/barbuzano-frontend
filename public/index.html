@@ -46,7 +46,7 @@
       </button>
 
       <h2 id="login-title">Acceso de clientes</h2>
-      <p class="login-subtitle">Introduce tus credenciales para acceder a tus consultas y documentos.</p>
+      <p class="login-subtitle" id="login-subtitle">Introduce tus credenciales para acceder a tus consultas y documentos.</p>
 
       <form class="login-form" id="login-form" novalidate>
         <label class="login-field">
@@ -63,7 +63,21 @@
         <button type="submit" id="login-btn" class="login-submit">Acceder</button>
       </form>
 
-      <a href="#recuperar" class="login-forgot">¿Has olvidado tu contraseña?</a>
+      <!-- Paso 2: solo aparece si la cuenta tiene la verificación en dos pasos activada -->
+      <form class="login-form" id="login-2fa-form" style="display:none" novalidate>
+        <label class="login-field">
+          <span>Código de verificación</span>
+          <input type="text" id="totp-code" placeholder="123456" inputmode="numeric"
+                 autocomplete="one-time-code" maxlength="16" required>
+        </label>
+
+        <p class="login-error" id="login-2fa-error" role="alert" hidden></p>
+
+        <button type="submit" id="login-2fa-btn" class="login-submit">Verificar</button>
+        <a href="#" class="login-forgot" id="login-2fa-back">Volver</a>
+      </form>
+
+      <a href="#recuperar" class="login-forgot" id="login-forgot">¿Has olvidado tu contraseña?</a>
     </div>
   </div>
 
