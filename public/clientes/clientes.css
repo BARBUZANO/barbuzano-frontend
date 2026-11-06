@@ -1051,3 +1051,156 @@ html.app, body.app {
   --role-admin: #2F7A45;
   --role-cliente: #2F6FA3;
 }
+
+
+/* ---------- Seguridad de la cuenta (verificación en dos pasos) ---------- */
+
+.sec-modal {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid rgba(var(--fg-rgb), 0.1);
+  border-radius: 18px;
+  box-shadow: 0 30px 80px var(--shadow), 0 0 0 1px rgba(var(--accent-rgb), 0.08);
+  padding: 2rem 2rem 1.8rem;
+  transform: translateY(14px) scale(0.98);
+  opacity: 0;
+  transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s ease;
+}
+
+.file-modal-overlay.is-open .sec-modal {
+  transform: translateY(0) scale(1);
+  opacity: 1;
+}
+
+.sec-modal [hidden] { display: none !important; }
+
+.sec-modal h2 {
+  font-family: 'Fraunces', serif;
+  font-weight: 400;
+  font-size: 1.4rem;
+  margin: 0 2rem 1.4rem 0;
+}
+
+.sec-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.sec-head h3 { font-size: 1rem; font-weight: 500; margin: 0; }
+
+.sec-text {
+  color: var(--fg-dim);
+  font-size: 0.88rem;
+  line-height: 1.55;
+  margin: 0 0 1rem;
+}
+
+.sec-text strong { color: var(--fg); font-weight: 500; }
+
+.sec-steps {
+  margin: 0 0 0.4rem;
+  padding-left: 1.2rem;
+  display: grid;
+  gap: 0.9rem;
+  color: var(--fg-dim);
+  font-size: 0.88rem;
+  line-height: 1.55;
+}
+
+.qr-box {
+  width: 200px;
+  max-width: 100%;
+  margin: 0.7rem 0;
+  padding: 0.6rem;
+  background: #fff; /* fondo blanco fijo: el QR se escanea igual en modo oscuro */
+  border-radius: 12px;
+}
+
+.qr-box svg { display: block; width: 100%; height: auto; }
+
+#sec-secret {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: 0.08em;
+  color: var(--fg);
+  background: rgba(var(--fg-rgb), 0.07);
+  padding: 0.15rem 0.45rem;
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.sec-modal .login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  margin-top: 0.9rem;
+}
+
+.sec-modal .login-field span { font-size: 0.8rem; color: var(--fg-dim); }
+
+.sec-modal .login-field input {
+  font: inherit;
+  color: var(--fg);
+  background: rgba(var(--fg-rgb), 0.04);
+  border: 1px solid rgba(var(--fg-rgb), 0.12);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  outline: none;
+  width: 100%;
+  transition: border-color 0.2s ease, background 0.2s ease;
+}
+
+.sec-modal .login-field input:focus {
+  border-color: var(--accent);
+  background: rgba(var(--fg-rgb), 0.06);
+}
+
+.sec-error {
+  color: var(--danger);
+  font-size: 0.84rem;
+  margin: 0.7rem 0 0;
+}
+
+.sec-modal .file-modal-actions { flex-wrap: wrap; }
+
+.recovery-list {
+  list-style: none;
+  margin: 0.4rem 0 0;
+  padding: 1rem;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem 0.8rem;
+  background: rgba(var(--fg-rgb), 0.05);
+  border-radius: 12px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.95rem;
+  letter-spacing: 0.06em;
+  color: var(--fg);
+  user-select: all;
+}
+
+/* Aviso de 2FA del cliente seleccionado (panel del asesor) */
+.client-2fa {
+  margin-top: 1rem;
+  padding: 0.8rem;
+  display: grid;
+  gap: 0.6rem;
+  border: 1px solid rgba(var(--fg-rgb), 0.1);
+  border-radius: 12px;
+}
+
+.client-2fa[hidden] { display: none; }
+.client-2fa p { margin: 0; font-size: 0.78rem; line-height: 1.4; color: var(--fg-dim); }
+.client-2fa .pill-btn { justify-self: start; padding: 0.4rem 0.9rem; font-size: 0.78rem; }
+
+@media (max-width: 560px) {
+  .sec-modal { padding: 1.5rem 1.2rem; }
+  .recovery-list { grid-template-columns: 1fr; }
+}
